@@ -1,15 +1,17 @@
 # M2SVid: End-to-End Inpainting and Refinement for Monocular-to-Stereo Video Conversion
 
 
-[![arXiv](https://img.shields.io/badge/arXiv-2505.16565-b31b1b?style=for-the-badge&logo=arxiv)](https://arxiv.org/abs/2505.16565)
-[![Project Page](https://img.shields.io/badge/Project-Page-blue?style=for-the-badge&logo=googlechrome)](https://m2svid.github.io/)
+[![Project Page](https://img.shields.io/badge/Project%20Page-m2svid.github.io-blue?style=flat&logo=googlechrome)](https://m2svid.github.io/)
+[![arXiv](https://img.shields.io/badge/arXiv-2505.16565-b31b1b.svg?style=flat&logo=arxiv)](https://arxiv.org/abs/2505.16565)
 
 
 by [**Nina Shvetsova**](https://ninatu.github.io/), [**Goutam Bhat**](https://goutamgmb.github.io/), [**Prune Truong**](https://prunetruong.com/), [**Hilde Kuehne**](https://hildekuehne.github.io/), [**Federico Tombari**](https://federicotombari.github.io/)
 
 **Accepted to 3DV 2026!**
 
-</div>
+<p align="center">
+  <img src="teaser.gif" width="600">
+</p>
 
 ---
 
@@ -25,7 +27,7 @@ Program](https://bughunters.google.com/open-source-security).*
 
 We tackle the problem of monocular-to-stereo video conversion and propose a novel architecture for inpainting and refinement of the warped right view obtained by depth-based reprojection of the input left view.
 We extend the Stable Video Diffusion (SVD) model to utilize the input left video, the warped right video, and the disocclusion masks as conditioning input to generate a high-quality right camera view. In order to effectively exploit information from neighboring frames for inpainting, we modify the attention layers in SVD to compute full attention for discoccluded pixels. Our model is trained to generate the right view video in an end-to-end manner without iterative diffusion steps by minimizing image space losses to ensure high-quality generation.
-Our approach outperforms previous state-of-the-art methods, being ranked best 2.6× more often than the second-place method in a user study, while being 6× faster.
+**Our approach outperforms previous state-of-the-art methods, being ranked best 2.6× more often than the second-place method in a user study, while being 6× faster.**
 
 
 
@@ -37,7 +39,7 @@ Our approach outperforms previous state-of-the-art methods, being ranked best 2.
 
 2. Download the [M2SVid weights (coming soon)](). We provide two model variants: one featuring full attention for disoccluded tokens and a standard version without.
 
-3. Optional (for training only) Download [stable-video-diffusion-img2vid-xt checkpoint](https://huggingface.co/stabilityai/stable-video-diffusion-img2vid-xt) and put it in `ckpts/`.
+3. Optional (for training only): download [stable-video-diffusion-img2vid-xt checkpoint](https://huggingface.co/stabilityai/stable-video-diffusion-img2vid-xt) and put it in `ckpts/`.
 
 
 ### Environment
@@ -50,7 +52,7 @@ conda env create -f environment.yml -n sgm
 ```
 
 
-## 💻 Inference
+## ⚙️ Inference
 
 Run inference on demo video:
 
@@ -61,6 +63,7 @@ bash inference.sh
 See examples outputs in `demo` folder.
 
 **Note 1:** The width/hight of the video should be divisible by 64.
+
 **Note 2:** The model was trained on a resolution of 512x512. For inference of higher resolution videos, please follow the tiling approach described in the [StereoCrafter paper](https://stereocrafter.github.io/). Our released models support temporal and spatial stitching.
 
 ### Inference Steps:
@@ -96,7 +99,7 @@ PYTHONPATH="./:./third_party/Hi3D-Official/:./third_party/pytorch-msssim/:${PYTH
 ```
 
 
-### Training and Quantitative Evaluation
+## 🏋️ Training and Quantitative Evaluation
 
 ### Datasets
 
@@ -184,7 +187,7 @@ PYTHONPATH="./:./third_party/Hi3D-Official/:./third_party/pytorch-msssim/:${PYTH
     --logdir outputs/training/m2svid 
 ```
 
-## Citation
+## 🎓 Citation
 
 ```bibtex
 @article{shvetsova2026m2svid,

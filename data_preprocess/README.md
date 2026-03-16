@@ -3,14 +3,14 @@
 ## Enviroment
 
 ```bash
-conda create -y -n bidavideo python=3.8 && 
-    conda activate bidavideo && 
-    pip install torch==2.0.0 torchvision==0.15.1 torchaudio==2.0.1 --index-url https://download.pytorch.org/whl/cu118 && 
-    pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" && 
-    pip install pip==24.0.0 && 
-    conda install ipykernel -y && ipython kernel install --user --name=bidavideo && 
-    pip install decord && 
-    pip install ffmpeg-python && pip install kornia && pip install kornia-rs && pip install kornia_moons 
+conda create -y -n bidavideo python=3.8 && \
+    conda activate bidavideo && \
+    pip install torch==2.0.0 torchvision==0.15.1 torchaudio==2.0.1 --index-url [https://download.pytorch.org/whl/cu118](https://download.pytorch.org/whl/cu118) && \
+    pip install "git+[https://github.com/facebookresearch/pytorch3d.git@stable](https://github.com/facebookresearch/pytorch3d.git@stable)" && \
+    pip install pip==24.0.0 && \
+    conda install ipykernel -y && ipython kernel install --user --name=bidavideo && \
+    pip install decord && \
+    pip install ffmpeg-python && pip install kornia && pip install kornia-rs && pip install kornia_moons
 ``` 
 
 Then install requirments for [bidavideo](https://github.com/TomTomTommi/bidavideo) via `pip install -r requirements.txt`
