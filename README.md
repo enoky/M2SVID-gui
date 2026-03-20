@@ -13,6 +13,8 @@ by [**Nina Shvetsova**](https://ninatu.github.io/), [**Goutam Bhat**](https://go
   <img src="teaser.gif" width="600">
 </p>
 
+**Update:** [March 20, 2026] We have released the pre-trained M2SVid weights! 
+
 ---
 
 *This is not an officially supported Google product. This project is not
@@ -37,7 +39,7 @@ We extend the Stable Video Diffusion (SVD) model to utilize the input left video
 
 1. Download `ckpts.zip` from [Hi3D repo](https://github.com/yanghb22-fdu/Hi3D-Official) and unzip (follow step "2. Download checkpoints here and unzip."). Our model follows Hi3D implementation and uses the same openclip model.
 
-2. Download the [M2SVid weights (coming soon)](). We provide two model variants: one featuring full attention for disoccluded tokens and a standard version without.
+2. Download the [M2SVid weights (8.5Gb)](https://storage.googleapis.com/gresearch/m2svid/m2svid_weights.zip) and extract them into the `ckpts` folder: `unzip m2svid_weights.zip -d ckpts/`. We provide two model variants: one with **full attention** for disoccluded tokens ([m2svid_weights.pt, 4.64Gb](https://storage.googleapis.com/gresearch/m2svid/m2svid_weights.pt)) and one **without full attention** ([m2svid_no_full_atten_weights.pt, 4.6Gb](https://storage.googleapis.com/gresearch/m2svid/m2svid_no_full_atten_weights.pt)). 
 
 3. Optional (for training only): download [stable-video-diffusion-img2vid-xt checkpoint](https://huggingface.co/stabilityai/stable-video-diffusion-img2vid-xt) and put it in `ckpts/`.
 
@@ -97,6 +99,23 @@ PYTHONPATH="./:./third_party/Hi3D-Official/:./third_party/pytorch-msssim/:${PYTH
         --reprojected_mask_path outputs/reprojected/input_reprojected_mask.mp4\
         --output_folder outputs/m2svid \
 ```
+
+**Note:** If you are using the version without full attention, ensure you use the `m2svid_no_full_atten.yaml` config instead:
+
+
+```bash
+source /opt/conda/bin/activate ""
+conda activate sgm
+PYTHONPATH="./:./third_party/Hi3D-Official/:./third_party/pytorch-msssim/:${PYTHONPATH}" python inpaint_and_refine.py  \
+        --mask_antialias 0 \
+        --model_config configs/m2svid_no_fullatten.yaml \
+        --ckpt ckpts/m2svid_no_full_atten_weights.pt \
+        --video_path demo/input.mp4  \
+        --reprojected_path outputs/reprojected/input_reprojected.mp4 \
+        --reprojected_mask_path outputs/reprojected/input_reprojected_mask.mp4\
+        --output_folder outputs/m2svid_no_full_atten \
+```
+
 
 
 ## 🏋️ Training and Quantitative Evaluation
