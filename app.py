@@ -261,8 +261,11 @@ def default_gui_settings():
             "codec": "H.265",
             "output_crf": 14,
             "mask_bin_thresh": 0.0,
+            "mask_close": 5,
             "mask_dilate": 13,
             "mask_blur": 3,
+            "mask_smoothstep": 0.0,
+            "laplacian_blend_levels": 0,
             "shadow_shift": 40,
             "shadow_start_op": 0.4,
             "shadow_decay": 0.4,
@@ -321,7 +324,7 @@ def pack_gui_settings_dict(args_tuple):
         m_inpainted_folder, m_original_folder, m_mask_folder, m_output_folder,
         m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse, m_batch_chunk_size, m_convergence, m_convergence_mode,
         m_codec, m_output_crf,
-        m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
+        m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
         m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
         m_preview_source, m_frame_slider,
     ) = args_tuple
@@ -379,8 +382,11 @@ def pack_gui_settings_dict(args_tuple):
             "codec": m_codec,
             "output_crf": m_output_crf,
             "mask_bin_thresh": m_mask_bin_thresh,
+            "mask_close": m_mask_close,
             "mask_dilate": m_mask_dilate,
             "mask_blur": m_mask_blur,
+            "mask_smoothstep": m_mask_smoothstep,
+            "laplacian_blend_levels": m_laplacian_blend_levels,
             "shadow_shift": m_shadow_shift,
             "shadow_start_op": m_shadow_start_op,
             "shadow_decay": m_shadow_decay,
@@ -831,7 +837,7 @@ def process_merging(
     inpainted_folder, original_folder, mask_folder, output_folder,
     use_gpu, output_format, batch_chunk_size, enable_color_transfer,
     codec, output_crf,
-    mask_binarize_threshold, mask_dilate_kernel_size, mask_blur_kernel_size,
+    mask_binarize_threshold, mask_close_kernel_size, mask_dilate_kernel_size, mask_blur_kernel_size, mask_smoothstep_strength, laplacian_blend_levels,
     shadow_shift, shadow_start_opacity, shadow_opacity_decay, shadow_min_opacity, shadow_decay_gamma,
     convergence, convergence_mode, undo_reverse=False, conflict_policy="skip"
 ):
@@ -861,8 +867,11 @@ def process_merging(
         "codec": codec,
         "output_crf": int(output_crf),
         "mask_binarize_threshold": float(mask_binarize_threshold),
+        "mask_close_kernel_size": int(mask_close_kernel_size),
         "mask_dilate_kernel_size": int(mask_dilate_kernel_size),
         "mask_blur_kernel_size": int(mask_blur_kernel_size),
+        "mask_smoothstep_strength": float(mask_smoothstep_strength),
+        "laplacian_blend_levels": int(laplacian_blend_levels),
         "shadow_shift": int(shadow_shift),
         "shadow_start_opacity": float(shadow_start_opacity if shadow_start_opacity is not None else 0.4),
         "shadow_opacity_decay": float(shadow_opacity_decay if shadow_opacity_decay is not None else 0.4),
@@ -1483,7 +1492,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                         label="Output Format",
                         choices=[
                             "Half SBS (Left-Right)", "Full SBS (Left-Right)", "Full SBS Cross-eye (Right-Left)",
-                            "Anaglyph (Red/Cyan)", "Anaglyph Half-Color", "Right-Eye Only"
+                            "Anaglyph Dubois", "Anaglyph (Red/Cyan)", "Anaglyph Half-Color", "Right-Eye Only"
                         ],
                         value="Full SBS (Left-Right)"
                     )
@@ -1509,8 +1518,11 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 with gr.Column(variant="panel"):
                     gr.Markdown("### Mask Processing & Thresholding")
                     m_mask_bin_thresh = gr.Slider(minimum=-1.0, maximum=1.0, step=0.01, label="Mask Binarize Threshold (-1 = disabled)", value=0.0)
+                    m_mask_close = gr.Slider(minimum=0, maximum=50, step=1, label="Mask Close Kernel", value=5)
                     m_mask_dilate = gr.Slider(minimum=0, maximum=50, step=1, label="Mask Dilate Kernel", value=13)
                     m_mask_blur = gr.Slider(minimum=0, maximum=50, step=1, label="Mask Blur Kernel", value=3)
+                    m_mask_smoothstep = gr.Slider(minimum=0.0, maximum=1.0, step=0.01, label="Mask Smoothstep Strength", value=0.0)
+                    m_laplacian_blend_levels = gr.Slider(minimum=0, maximum=6, step=1, label="Laplacian Blend Levels (0 = disabled)", value=0)
                 with gr.Column(variant="panel"):
                     gr.Markdown("### Shadow / Edge Mitigation")
                     m_shadow_shift = gr.Slider(minimum=0, maximum=100, step=1, label="Shadow Shift Amount", value=40)
@@ -1590,7 +1602,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             def do_preview(video_list, selected_video, frame_idx, preview_source,
                            inpainted_folder, original_folder, mask_folder,
                            use_gpu, color_transfer,
-                           mask_thresh, mask_dilate, mask_blur,
+                           mask_thresh, mask_close, mask_dilate, mask_blur, mask_smoothstep, laplacian_blend_levels,
                            shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma, convergence, convergence_mode,
                            undo_reverse):
                 if not video_list or not selected_video:
@@ -1613,8 +1625,11 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     "add_borders": False,
                     "enable_color_transfer": color_transfer,
                     "mask_binarize_threshold": float(mask_thresh if mask_thresh is not None else -1.0),
+                    "mask_close_kernel_size": int(mask_close or 0),
                     "mask_dilate_kernel_size": int(mask_dilate or 0),
                     "mask_blur_kernel_size": int(mask_blur or 0),
+                    "mask_smoothstep_strength": float(mask_smoothstep or 0.0),
+                    "laplacian_blend_levels": int(laplacian_blend_levels or 0),
                     "shadow_shift": int(shadow_shift or 0),
                     "shadow_start_opacity": float(shadow_start_op if shadow_start_op is not None else 0.7),
                     "shadow_opacity_decay": float(shadow_decay if shadow_decay is not None else 0.1),
@@ -1640,7 +1655,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     m_video_list_state, m_video_dropdown, m_frame_slider, m_preview_source,
                     m_inpainted_folder, m_original_folder, m_mask_folder,
                     m_use_gpu, m_color_transfer,
-                    m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
+                    m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
                     m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
                     m_convergence, m_convergence_mode, m_undo_reverse
                 ],
@@ -1653,7 +1668,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             
             # Save per-video settings
             def save_video_settings(video_list, selected_video,
-                                    mask_thresh, mask_dilate, mask_blur,
+                                    mask_thresh, mask_close, mask_dilate, mask_blur, mask_smoothstep, laplacian_blend_levels,
                                     shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma,
                                     convergence, convergence_mode, output_format, use_gpu, color_transfer, undo_reverse):
                 if not video_list or not selected_video:
@@ -1669,8 +1684,11 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 
                 settings_to_save = {
                     "mask_binarize_threshold": float(mask_thresh if mask_thresh is not None else -1.0),
+                    "mask_close_kernel_size": int(mask_close or 0),
                     "mask_dilate_kernel_size": int(mask_dilate or 0),
                     "mask_blur_kernel_size": int(mask_blur or 0),
+                    "mask_smoothstep_strength": float(mask_smoothstep or 0.0),
+                    "laplacian_blend_levels": int(laplacian_blend_levels or 0),
                     "shadow_shift": int(shadow_shift or 0),
                     "shadow_start_opacity": float(shadow_start_op if shadow_start_op is not None else 0.7),
                     "shadow_opacity_decay": float(shadow_decay if shadow_decay is not None else 0.1),
@@ -1694,7 +1712,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 fn=save_video_settings,
                 inputs=[
                     m_video_list_state, m_video_dropdown,
-                    m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
+                    m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
                     m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
                     m_convergence, m_convergence_mode, m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse
                 ],
@@ -1704,7 +1722,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             # Load per-video settings
             def load_video_settings(video_list, selected_video):
                 if not video_list or not selected_video:
-                    return [gr.update()]*14 + ["No video selected."]
+                    return [gr.update()]*17 + ["No video selected."]
                 
                 video_info = None
                 for v in video_list:
@@ -1712,20 +1730,23 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                         video_info = v
                         break
                 if not video_info:
-                    return [gr.update()]*14 + ["Video not found."]
+                    return [gr.update()]*17 + ["Video not found."]
                 
                 sidecar_path = os.path.splitext(video_info["inpainted"])[0] + ".mergesettings.json"
                 if not os.path.exists(sidecar_path):
                     # No sidecar: don't revert to hardcoded defaults, just keep current GUI state
-                    return [gr.update()]*14 + [f"No saved settings found for {selected_video}"]
+                    return [gr.update()]*17 + [f"No saved settings found for {selected_video}"]
                 
                 try:
                     with open(sidecar_path, "r") as f:
                         s = json.load(f)
                     return [
                         s.get("mask_binarize_threshold", gr.update()),
+                        s.get("mask_close_kernel_size", gr.update()),
                         s.get("mask_dilate_kernel_size", gr.update()),
                         s.get("mask_blur_kernel_size", gr.update()),
+                        s.get("mask_smoothstep_strength", gr.update()),
+                        s.get("laplacian_blend_levels", gr.update()),
                         s.get("shadow_shift", gr.update()),
                         s.get("shadow_start_opacity", gr.update()),
                         s.get("shadow_opacity_decay", gr.update()),
@@ -1740,19 +1761,19 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                         f"✅ Loaded settings from {os.path.basename(sidecar_path)}"
                     ]
                 except Exception as e:
-                    return [gr.update()]*14 + [f"Error loading settings: {e}"]
+                    return [gr.update()]*17 + [f"Error loading settings: {e}"]
 
             # Auto-preview on video selection change
             def on_video_change(video_list, selected_video, preview_source,
                                 inpainted_folder, original_folder, mask_folder,
                                 use_gpu, color_transfer,
-                                mask_thresh, mask_dilate, mask_blur,
+                                mask_thresh, mask_close, mask_dilate, mask_blur, mask_smoothstep, laplacian_blend_levels,
                                 shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma, convergence, convergence_mode,
                                 undo_reverse):
                 return do_preview(video_list, selected_video, 0, preview_source,
                                   inpainted_folder, original_folder, mask_folder,
                                   use_gpu, color_transfer,
-                                  mask_thresh, mask_dilate, mask_blur,
+                                  mask_thresh, mask_close, mask_dilate, mask_blur, mask_smoothstep, laplacian_blend_levels,
                                   shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma, convergence, convergence_mode,
                                   undo_reverse)
             
@@ -1762,7 +1783,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     m_video_list_state, m_video_dropdown, m_preview_source,
                     m_inpainted_folder, m_original_folder, m_mask_folder,
                     m_use_gpu, m_color_transfer,
-                    m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
+                    m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
                     m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
                     m_convergence, m_convergence_mode, m_undo_reverse
                 ],
@@ -1771,7 +1792,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 fn=load_video_settings,
                 inputs=[m_video_list_state, m_video_dropdown],
                 outputs=[
-                    m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
+                    m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
                     m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
                     m_convergence, m_convergence_mode, m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse,
                     m_settings_status
@@ -1783,13 +1804,13 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 m_video_list_state, m_video_dropdown, m_frame_slider, m_preview_source,
                 m_inpainted_folder, m_original_folder, m_mask_folder,
                 m_use_gpu, m_color_transfer,
-                m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
+                m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
                 m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
                 m_convergence, m_convergence_mode, m_undo_reverse
             ]
             _auto_preview_outputs = [m_preview_image, m_frame_slider]
             
-            for _ctrl in [m_preview_source, m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
+            for _ctrl in [m_preview_source, m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
                           m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
                           m_use_gpu, m_color_transfer, m_convergence, m_convergence_mode, m_frame_slider, m_undo_reverse]:
                 _ctrl.change(
@@ -1802,7 +1823,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 fn=load_video_settings,
                 inputs=[m_video_list_state, m_video_dropdown],
                 outputs=[
-                    m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
+                    m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
                     m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
                     m_convergence, m_convergence_mode, m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse,
                     m_settings_status
@@ -1814,7 +1835,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 inpainted_f, original_f, mask_f, output_f,
                 use_gpu, output_format, batch_chunk_size, color_transfer,
                 codec, crf,
-                mask_bin, mask_dilate, mask_blur,
+                mask_bin, mask_close, mask_dilate, mask_blur, mask_smoothstep, laplacian_blend_levels,
                 shadow_shift, shadow_start_op, shadow_decay, shadow_min_op, shadow_gamma,
                 convergence, convergence_mode, undo_reverse
             ):
@@ -1879,7 +1900,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 m_inpainted_folder, m_original_folder, m_mask_folder, m_output_folder,
                 m_use_gpu, m_output_format, m_batch_chunk_size, m_color_transfer,
                 m_codec, m_output_crf,
-                m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
+                m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
                 m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
                 m_convergence, m_convergence_mode, m_undo_reverse
             ]
@@ -1926,7 +1947,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
         m_inpainted_folder, m_original_folder, m_mask_folder, m_output_folder,
         m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse, m_batch_chunk_size, m_convergence, m_convergence_mode,
         m_codec, m_output_crf,
-        m_mask_bin_thresh, m_mask_dilate, m_mask_blur,
+        m_mask_bin_thresh, m_mask_close, m_mask_dilate, m_mask_blur, m_mask_smoothstep, m_laplacian_blend_levels,
         m_shadow_shift, m_shadow_start_op, m_shadow_decay, m_shadow_min_op, m_shadow_gamma,
         m_preview_source, m_frame_slider,
     ]
@@ -1944,7 +1965,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             m["inpainted_folder"], m["original_folder"], m["mask_folder"], m["output_folder"],
             m["output_format"], m["use_gpu"], m["color_transfer"], m["undo_reverse"], m["batch_chunk_size"], m["convergence"], m["convergence_mode"],
             m["codec"], m["output_crf"],
-            m["mask_bin_thresh"], m["mask_dilate"], m["mask_blur"],
+            m.get("mask_bin_thresh", 0.0), m.get("mask_close", 5), m.get("mask_dilate", 13), m.get("mask_blur", 3), m.get("mask_smoothstep", 0.0), m.get("laplacian_blend_levels", 0),
             m["shadow_shift"], m["shadow_start_op"], m["shadow_decay"], m["shadow_min_op"], m["shadow_gamma"],
             m["preview_source"], m["frame_slider"],
         )

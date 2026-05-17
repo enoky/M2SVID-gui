@@ -122,7 +122,7 @@ def generate_preview_frame(video_info, settings, frame_index=0):
     
     # Resize depth to match video if needed
     if depth_gray.shape[0] != h or depth_gray.shape[1] != w:
-        depth_gray = cv2.resize(depth_gray, (w, h), interpolation=cv2.INTER_CUBIC)
+        depth_gray = cv2.resize(depth_gray, (w, h), interpolation=cv2.INTER_LINEAR)
 
     # Store raw depth for "Depth Map" preview
     raw_depth_gray = depth_gray.copy()

@@ -149,12 +149,12 @@ target_W = (W_rp // 8) * 8
 # Resize reprojected and mask if they aren't multiples of 8 (required for VAE consistency)
 if H_rp != target_H or W_rp != target_W:
     print(f"Warning: Grid resolution ({W_rp}x{H_rp}) is not a multiple of 8. Resizing to {target_W}x{target_H} to avoid model mismatch.")
-    reprojected = F.interpolate(reprojected.float(), size=(target_H, target_W), mode='bicubic', align_corners=False).to(reprojected.dtype).clamp(0, 255)
-    reprojected_mask = F.interpolate(reprojected_mask.float(), size=(target_H, target_W), mode='bicubic', align_corners=False).to(reprojected_mask.dtype).clamp(-1, 1)
+    reprojected = F.interpolate(reprojected.float(), size=(target_H, target_W), mode='bilinear', align_corners=False).to(reprojected.dtype).clamp(0, 255)
+    reprojected_mask = F.interpolate(reprojected_mask.float(), size=(target_H, target_W), mode='bilinear', align_corners=False).to(reprojected_mask.dtype).clamp(-1, 1)
 
 # Resize input_video to match target resolution exactly (no crops, irrespective of aspect ratio)
 if H_iv != target_H or W_iv != target_W:
-    input_video = F.interpolate(input_video.float(), size=(target_H, target_W), mode='bicubic', align_corners=False).to(input_video.dtype).clamp(0, 255)
+    input_video = F.interpolate(input_video.float(), size=(target_H, target_W), mode='bilinear', align_corners=False).to(input_video.dtype).clamp(0, 255)
 
 c, T, H, W = reprojected_mask.shape
 downsampled_resolution = [int(H / 8), int(W / 8)]
@@ -169,7 +169,6 @@ for i in range(0, T, chunk_size_resize):
     # Normalize/clamp to [0, 1] before resizing if needed, but here they are 0/1
     m_chunk = transforms.Resize(
         downsampled_resolution, 
-        interpolation=transforms.InterpolationMode.BICUBIC, 
         antialias=mask_antialias
     )(m_chunk).clamp(0, 1)
     resized_masks.append(m_chunk.half()) # Store as half precision [0, 1]

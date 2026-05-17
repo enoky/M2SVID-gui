@@ -13,9 +13,29 @@ def apply_mask_dilation(mask, kernel_size, use_gpu=False):
     """
     if kernel_size <= 0:
         return mask
+    if kernel_size % 2 == 0:
+        kernel_size += 1
     padding = kernel_size // 2
     dilated = F.max_pool2d(mask, kernel_size=kernel_size, stride=1, padding=padding)
     return dilated
+
+
+def apply_mask_closing(mask, kernel_size, use_gpu=False):
+    """
+    Applies morphological closing (dilation followed by erosion) to a mask.
+    This effectively fills small black holes/lines within white regions without expanding overall boundaries.
+    mask: tensor of shape (B, 1, H, W)
+    """
+    if kernel_size <= 0:
+        return mask
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    padding = kernel_size // 2
+    # Dilate (max_pool)
+    dilated = F.max_pool2d(mask, kernel_size=kernel_size, stride=1, padding=padding)
+    # Erode (negative max_pool on negated tensor)
+    eroded = -F.max_pool2d(-dilated, kernel_size=kernel_size, stride=1, padding=padding)
+    return eroded
 
 
 def apply_gaussian_blur(mask, kernel_size, use_gpu=False):
@@ -154,3 +174,49 @@ def apply_optimized_anaglyph_torch(left, right):
         + left[:, 2:3] * 0.114
     )
     return torch.cat([left_gray, right[:, 1:2], right[:, 2:3]], dim=1).clamp(0, 1)
+
+def apply_laplacian_blend(imgA, imgB, mask, levels=4):
+    """
+    Applies Laplacian Pyramid Blending to seamlessly stitch imgA and imgB using mask.
+    imgA: warped background
+    imgB: inpainted foreground
+    mask: float tensor (0.0 to 1.0)
+    levels: depth of the pyramid (e.g. 4 or 5)
+    """
+    if levels <= 0:
+        return imgA * (1.0 - mask) + imgB * mask
+        
+    g_imgA = [imgA]
+    g_imgB = [imgB]
+    g_mask = [mask]
+    
+    for _ in range(levels):
+        g_imgA.append(F.avg_pool2d(g_imgA[-1], 2))
+        g_imgB.append(F.avg_pool2d(g_imgB[-1], 2))
+        g_mask.append(F.avg_pool2d(g_mask[-1], 2))
+        
+    l_imgA = [g_imgA[-1]]
+    l_imgB = [g_imgB[-1]]
+    
+    for i in range(levels - 1, -1, -1):
+        size = g_imgA[i].shape[-2:]
+        up_imgA = F.interpolate(g_imgA[i+1], size=size, mode='bilinear', align_corners=False)
+        up_imgB = F.interpolate(g_imgB[i+1], size=size, mode='bilinear', align_corners=False)
+        l_imgA.append(g_imgA[i] - up_imgA)
+        l_imgB.append(g_imgB[i] - up_imgB)
+
+    g_mask_rev = [g_mask[-1]]
+    for i in range(levels - 1, -1, -1):
+        g_mask_rev.append(g_mask[i])
+
+    blended_pyramid = []
+    for lA, lB, m in zip(l_imgA, l_imgB, g_mask_rev):
+        blended_pyramid.append(lA * (1.0 - m) + lB * m)
+
+    blended_img = blended_pyramid[0]
+    for i in range(1, levels + 1):
+        size = blended_pyramid[i].shape[-2:]
+        blended_img = F.interpolate(blended_img, size=size, mode='bilinear', align_corners=False)
+        blended_img += blended_pyramid[i]
+
+    return blended_img.clamp(0, 1)

@@ -20,8 +20,9 @@ from core.common.video_io import start_ffmpeg_pipe_process, get_video_stream_inf
 from core.common.gpu_utils import release_cuda_memory
 from core.common.sidecar_manager import SidecarConfigManager, find_video_by_core_name, find_sidecar_file, read_clip_sidecar
 from core.common.image_processing import (
-    apply_mask_dilation, apply_gaussian_blur, apply_shadow_blur,
-    apply_color_transfer,    apply_dubois_anaglyph_torch, apply_optimized_anaglyph_torch
+    apply_mask_dilation, apply_mask_closing, apply_gaussian_blur, apply_shadow_blur,
+    apply_color_transfer, apply_borders_to_frames, apply_optimized_anaglyph_torch,
+    apply_laplacian_blend, apply_dubois_anaglyph_torch
 )
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -281,7 +282,7 @@ def run_batch_process(settings, single_video_path=None):
                     # Resize original_left to match warped dimensions if needed
                     if original_left.shape[2] != hires_H or original_left.shape[3] != hires_W:
                         original_left = F.interpolate(
-                            original_left, size=(hires_H, hires_W), mode="bicubic", align_corners=False
+                            original_left, size=(hires_H, hires_W), mode="bilinear", align_corners=False
                         ).clamp(0, 1)
 
                     mask_np = mask_raw.permute(0, 2, 3, 1).cpu().numpy()
@@ -309,18 +310,18 @@ def run_batch_process(settings, single_video_path=None):
                                     new_h = hires_H
                                     new_w = int(round(hires_H * inpaint_aspect))
                                 inpainted = F.interpolate(
-                                    inpainted, size=(new_h, new_w), mode="bicubic", align_corners=False
+                                    inpainted, size=(new_h, new_w), mode="bilinear", align_corners=False
                                 ).clamp(0, 1)
-                                mask = F.interpolate(mask, size=(new_h, new_w), mode="bicubic", align_corners=False).clamp(0, 1)
+                                mask = F.interpolate(mask, size=(new_h, new_w), mode="bilinear", align_corners=False).clamp(0, 1)
                                 inpainted = F.interpolate(
-                                    inpainted, size=(hires_H, hires_W), mode="bicubic", align_corners=False
+                                    inpainted, size=(hires_H, hires_W), mode="bilinear", align_corners=False
                                 ).clamp(0, 1)
-                                mask = F.interpolate(mask, size=(hires_H, hires_W), mode="bicubic", align_corners=False).clamp(0, 1)
+                                mask = F.interpolate(mask, size=(hires_H, hires_W), mode="bilinear", align_corners=False).clamp(0, 1)
                             else:
                                 inpainted = F.interpolate(
-                                    inpainted, size=(hires_H, hires_W), mode="bicubic", align_corners=False
+                                    inpainted, size=(hires_H, hires_W), mode="bilinear", align_corners=False
                                 ).clamp(0, 1)
-                                mask = F.interpolate(mask, size=(hires_H, hires_W), mode="bicubic", align_corners=False).clamp(0, 1)
+                                mask = F.interpolate(mask, size=(hires_H, hires_W), mode="bilinear", align_corners=False).clamp(0, 1)
     
     
     
@@ -334,8 +335,17 @@ def run_batch_process(settings, single_video_path=None):
                             inpainted = torch.stack(adjusted_frames)
 
                     processed_mask = mask.clone()
+                    t_H, t_W = warped_original.shape[2], warped_original.shape[3]
+                    if processed_mask.shape[2] != t_H or processed_mask.shape[3] != t_W:
+                        processed_mask = F.interpolate(processed_mask, size=(t_H, t_W), mode="bilinear", align_corners=False).clamp(0, 1)
+
                     if s["mask_binarize_threshold"] >= 0.0:
-                        processed_mask = (mask > s["mask_binarize_threshold"]).float()
+                        processed_mask = (processed_mask > s["mask_binarize_threshold"]).float()
+
+                    if s.get("mask_close_kernel_size", 0) > 0:
+                        processed_mask = apply_mask_closing(
+                            processed_mask, s["mask_close_kernel_size"], use_gpu
+                        )
 
                     if s["mask_dilate_kernel_size"] > 0:
                         processed_mask = apply_mask_dilation(
@@ -355,14 +365,21 @@ def run_batch_process(settings, single_video_path=None):
                             use_gpu,
                         )
 
-                    # Ensure inpainted and mask exactly match warped_original dims (resize, never crop)
+                    if s.get("mask_smoothstep_strength", 0.0) > 0.0:
+                        strength = float(s["mask_smoothstep_strength"])
+                        smooth_mask = processed_mask * processed_mask * (3.0 - 2.0 * processed_mask)
+                        processed_mask = processed_mask * (1.0 - strength) + smooth_mask * strength
+
+                    # Ensure inpainted exactly matches warped_original dims
                     t_H, t_W = warped_original.shape[2], warped_original.shape[3]
                     if inpainted.shape[2] != t_H or inpainted.shape[3] != t_W:
-                        inpainted = F.interpolate(inpainted, size=(t_H, t_W), mode="bicubic", align_corners=False).clamp(0, 1)
-                    if processed_mask.shape[2] != t_H or processed_mask.shape[3] != t_W:
-                        processed_mask = F.interpolate(processed_mask, size=(t_H, t_W), mode="bicubic", align_corners=False).clamp(0, 1)
+                        inpainted = F.interpolate(inpainted, size=(t_H, t_W), mode="bilinear", align_corners=False).clamp(0, 1)
 
-                    blended_right_eye = warped_original * (1 - processed_mask) + inpainted * processed_mask
+                    lap_levels = int(s.get("laplacian_blend_levels", 0))
+                    if lap_levels > 0:
+                        blended_right_eye = apply_laplacian_blend(warped_original, inpainted, processed_mask, levels=lap_levels)
+                    else:
+                        blended_right_eye = warped_original * (1 - processed_mask) + inpainted * processed_mask
 
                     # Convergence adjustment (horizontal shift of both eyes)
                     convergence = int(s.get("convergence", 0))
@@ -384,8 +401,8 @@ def run_batch_process(settings, single_video_path=None):
                             new_H = int(round(H * zoom_factor))
                             
                             # Zoom both
-                            original_left = F.interpolate(original_left, size=(new_H, new_W), mode="bicubic", align_corners=False).clamp(0, 1)
-                            blended_right_eye = F.interpolate(blended_right_eye, size=(new_H, new_W), mode="bicubic", align_corners=False).clamp(0, 1)
+                            original_left = F.interpolate(original_left, size=(new_H, new_W), mode="bilinear", align_corners=False).clamp(0, 1)
+                            blended_right_eye = F.interpolate(blended_right_eye, size=(new_H, new_W), mode="bilinear", align_corners=False).clamp(0, 1)
                             
                             # Recalculate shifts for zoomed dimensions
                             # We must crop WxH including the shift.
@@ -448,12 +465,14 @@ def run_batch_process(settings, single_video_path=None):
                         final_chunk = torch.cat([blended_right_eye, original_left], dim=3)
                     elif output_format == "Half SBS (Left-Right)":
                         resized_left = F.interpolate(
-                            original_left, size=(hires_H, hires_W // 2), mode="bicubic", align_corners=False
+                            original_left, size=(hires_H, hires_W // 2), mode="bilinear", align_corners=False
                         ).clamp(0, 1)
                         resized_right = F.interpolate(
-                            blended_right_eye, size=(hires_H, hires_W // 2), mode="bicubic", align_corners=False
+                            blended_right_eye, size=(hires_H, hires_W // 2), mode="bilinear", align_corners=False
                         ).clamp(0, 1)
                         final_chunk = torch.cat([resized_left, resized_right], dim=3)
+                    elif output_format == "Anaglyph Dubois":
+                        final_chunk = apply_dubois_anaglyph_torch(original_left, blended_right_eye)
                     elif output_format == "Anaglyph (Red/Cyan)":
                         final_chunk = torch.cat(
                             [

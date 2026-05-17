@@ -158,7 +158,7 @@ def process_video_with_depth(
 
         # Space alignment & Scaling
         depth_batch_resized = np.array([
-            cv2.resize(d_frame, (width, height), interpolation=cv2.INTER_CUBIC)
+            cv2.resize(d_frame, (width, height), interpolation=cv2.INTER_LINEAR)
             for d_frame in depth_batch
         ])
 

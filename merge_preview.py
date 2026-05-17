@@ -17,10 +17,13 @@ _core_loaded = False
 VideoReader = None
 cpu_ctx = None
 apply_mask_dilation = None
+apply_mask_closing = None
 apply_gaussian_blur = None
 apply_shadow_blur = None
 apply_color_transfer = None
 apply_borders_to_frames = None
+apply_laplacian_blend = None
+apply_guided_filter_mask = None
 SidecarConfigManager = None
 find_video_by_core_name = None
 read_clip_sidecar = None
@@ -29,8 +32,8 @@ read_clip_sidecar = None
 def _ensure_imports():
     global _decord_loaded, _core_loaded
     global VideoReader, cpu_ctx
-    global apply_mask_dilation, apply_gaussian_blur, apply_shadow_blur
-    global apply_color_transfer, apply_borders_to_frames
+    global apply_mask_dilation, apply_mask_closing, apply_gaussian_blur, apply_shadow_blur
+    global apply_color_transfer, apply_borders_to_frames, apply_laplacian_blend, apply_guided_filter_mask
     global SidecarConfigManager, find_video_by_core_name, read_clip_sidecar
 
     if not _decord_loaded:
@@ -41,9 +44,9 @@ def _ensure_imports():
 
     if not _core_loaded:
         from core.common.image_processing import (
-            apply_mask_dilation as _amd, apply_gaussian_blur as _agb,
+            apply_mask_dilation as _amd, apply_mask_closing as _amc, apply_gaussian_blur as _agb,
             apply_shadow_blur as _asb, apply_color_transfer as _act,
-            apply_borders_to_frames as _abtf
+            apply_borders_to_frames as _abtf, apply_laplacian_blend as _alb
         )
         from core.common.sidecar_manager import (
             SidecarConfigManager as _scm,
@@ -51,10 +54,12 @@ def _ensure_imports():
             read_clip_sidecar as _rcs
         )
         apply_mask_dilation = _amd
+        apply_mask_closing = _amc
         apply_gaussian_blur = _agb
         apply_shadow_blur = _asb
         apply_color_transfer = _act
         apply_borders_to_frames = _abtf
+        apply_laplacian_blend = _alb
         SidecarConfigManager = _scm
         find_video_by_core_name = _fvbcn
         read_clip_sidecar = _rcs
@@ -222,7 +227,7 @@ def generate_preview_frame(video_info, settings, frame_index=0):
     # Resize original_left to match warped dimensions if needed
     if original_left.shape[2] != hires_H or original_left.shape[3] != hires_W:
         original_left = F.interpolate(
-            original_left, size=(hires_H, hires_W), mode="bicubic", align_corners=False
+            original_left, size=(hires_H, hires_W), mode="bilinear", align_corners=False
         ).clamp(0, 1)
 
     mask = torch.mean(mask_raw, dim=1, keepdim=True)
@@ -248,10 +253,10 @@ def generate_preview_frame(video_info, settings, frame_index=0):
                 else:
                     new_h = hires_H
                     new_w = int(round(hires_H * inpaint_aspect))
-                inpainted = F.interpolate(inpainted, size=(new_h, new_w), mode="bicubic", align_corners=False).clamp(0, 1)
-                mask = F.interpolate(mask, size=(new_h, new_w), mode="bicubic", align_corners=False).clamp(0, 1)
-            inpainted = F.interpolate(inpainted, size=(hires_H, hires_W), mode="bicubic", align_corners=False).clamp(0, 1)
-            mask = F.interpolate(mask, size=(hires_H, hires_W), mode="bicubic", align_corners=False).clamp(0, 1)
+                inpainted = F.interpolate(inpainted, size=(new_h, new_w), mode="bilinear", align_corners=False).clamp(0, 1)
+                mask = F.interpolate(mask, size=(new_h, new_w), mode="bilinear", align_corners=False).clamp(0, 1)
+            inpainted = F.interpolate(inpainted, size=(hires_H, hires_W), mode="bilinear", align_corners=False).clamp(0, 1)
+            mask = F.interpolate(mask, size=(hires_H, hires_W), mode="bilinear", align_corners=False).clamp(0, 1)
     
     
     
@@ -261,15 +266,25 @@ def generate_preview_frame(video_info, settings, frame_index=0):
 
     # Mask processing
     processed_mask = mask.clone()
+    
+    target_H, target_W = warped_original.shape[2], warped_original.shape[3]
+    if processed_mask.shape[2] != target_H or processed_mask.shape[3] != target_W:
+        processed_mask = F.interpolate(processed_mask, size=(target_H, target_W), mode="bilinear", align_corners=False).clamp(0, 1)
+
     thresh = settings.get("mask_binarize_threshold", -1.0)
     if thresh >= 0.0:
-        processed_mask = (mask > thresh).float()
+        processed_mask = (processed_mask > thresh).float()
+
+    close_k = int(settings.get("mask_close_kernel_size", 0))
+    if close_k > 0:
+        processed_mask = apply_mask_closing(processed_mask, close_k, use_gpu)
 
     dilate_k = int(settings.get("mask_dilate_kernel_size", 0))
     if dilate_k > 0:
         processed_mask = apply_mask_dilation(processed_mask, dilate_k, use_gpu)
 
     blur_k = int(settings.get("mask_blur_kernel_size", 0))
+
     if blur_k > 0:
         processed_mask = apply_gaussian_blur(processed_mask, blur_k, use_gpu)
 
@@ -284,14 +299,19 @@ def generate_preview_frame(video_info, settings, frame_index=0):
             use_gpu,
         )
 
-    # Ensure inpainted and mask exactly match warped_original dimensions (resize, never crop)
-    target_H, target_W = warped_original.shape[2], warped_original.shape[3]
-    if inpainted.shape[2] != target_H or inpainted.shape[3] != target_W:
-        inpainted = F.interpolate(inpainted, size=(target_H, target_W), mode="bicubic", align_corners=False).clamp(0, 1)
-    if processed_mask.shape[2] != target_H or processed_mask.shape[3] != target_W:
-        processed_mask = F.interpolate(processed_mask, size=(target_H, target_W), mode="bicubic", align_corners=False).clamp(0, 1)
+    smooth_str = float(settings.get("mask_smoothstep_strength", 0.0))
+    if smooth_str > 0.0:
+        smooth_mask = processed_mask * processed_mask * (3.0 - 2.0 * processed_mask)
+        processed_mask = processed_mask * (1.0 - smooth_str) + smooth_mask * smooth_str
 
-    blended_right_eye = warped_original * (1 - processed_mask) + inpainted * processed_mask
+    if inpainted.shape[2] != target_H or inpainted.shape[3] != target_W:
+        inpainted = F.interpolate(inpainted, size=(target_H, target_W), mode="bilinear", align_corners=False).clamp(0, 1)
+
+    lap_levels = int(settings.get("laplacian_blend_levels", 0))
+    if lap_levels > 0:
+        blended_right_eye = apply_laplacian_blend(warped_original, inpainted, processed_mask, levels=lap_levels)
+    else:
+        blended_right_eye = warped_original * (1 - processed_mask) + inpainted * processed_mask
 
     # Convergence adjustment (horizontal shift of both eyes)
     convergence = int(settings.get("convergence", 0))
@@ -313,8 +333,8 @@ def generate_preview_frame(video_info, settings, frame_index=0):
             new_H = int(round(H * zoom_factor))
             
             # Zoom both
-            original_left = F.interpolate(original_left, size=(new_H, new_W), mode="bicubic", align_corners=False).clamp(0, 1)
-            blended_right_eye = F.interpolate(blended_right_eye, size=(new_H, new_W), mode="bicubic", align_corners=False).clamp(0, 1)
+            original_left = F.interpolate(original_left, size=(new_H, new_W), mode="bilinear", align_corners=False).clamp(0, 1)
+            blended_right_eye = F.interpolate(blended_right_eye, size=(new_H, new_W), mode="bilinear", align_corners=False).clamp(0, 1)
             
             # Recalculate shifts for zoomed dimensions
             # Actually, simply cropping the center WxH and THEN shifting would lead to black bars again.
