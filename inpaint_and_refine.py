@@ -29,11 +29,14 @@ parser.add_argument("--reprojected_closing_holes_kernel", type=int, default=11)
 parser.add_argument("--mask_antialias", type=int, default=False)
 parser.add_argument("--spatial_tile_size", type=int, default=512)
 parser.add_argument("--spatial_tile_overlap", type=int, default=256)
+parser.add_argument("--decode_spatial_tile_size", type=int, default=256)
+parser.add_argument("--decode_spatial_tile_overlap", type=int, default=32)
 # New temporal chunking arguments
 parser.add_argument("--chunk_size", type=int, default=25, help="Total frames per model forward pass")
 parser.add_argument("--overlap", type=int, default=3, help="Number of frames to overlap and cross-fade")
 parser.add_argument("--original_input_blend_strength", type=float, default=0.0, help="Weight of original input for conditioning")
 parser.add_argument("--dry_run", action="store_true", help="Print chunk schedule and exit without running the model")
+parser.add_argument("--steps", type=int, default=None, help="Number of inference steps (default is from model config)")
 args = parser.parse_args()
 
 
@@ -107,6 +110,8 @@ seed = random.randint(0, 65535)
 seed_everything(seed)
 
 config = OmegaConf.load(args.model_config)
+if args.steps is not None and args.steps > 0:
+    config.model.params.sampler_config.params.num_steps = args.steps
 denoising_model = instantiate_from_config(config.model).cpu()
 denoising_model.init_from_ckpt(args.ckpt)
 denoising_model = denoising_model.half().eval()
@@ -332,18 +337,45 @@ for ci, chunk_info in enumerate(tqdm(chunk_schedule, desc="Temporal Chunks")):
     resolved = chunk_latents / chunk_weights  # (1, 4, n_gen, lH, lW)
     del chunk_latents, chunk_weights
 
-    # Decode kept frames and stream to ffmpeg
     first_stage_model.to('cuda')
-    new_overlap_buffer = []
+    
+    # Decode full spatial resolution, but chunk temporally to save VRAM
+    # We use a decode chunk size of 2 to preserve some temporal consistency 
+    # via the 3D convolutions without causing an Out-Of-Memory error.
+    decode_chunk_size = 2  
+    resolved_pixels_list = []
+    
+    decode_pbar = tqdm(total=(n_gen + decode_chunk_size - 1) // decode_chunk_size,
+                       desc=f"Decoding Spatial Tiles for chunk {ci}",
+                       leave=False)
 
-    for f_rel in range(0, actual_len):
-        frame_latent = resolved[:, :, f_rel:f_rel + 1, :, :].cuda()
-        frame_latent_flat = einops.rearrange(frame_latent, 'b c t h w -> (b t) c h w')
+    for f_idx in range(0, n_gen, decode_chunk_size):
+        end_idx = min(f_idx + decode_chunk_size, n_gen)
+        cur_n_gen = end_idx - f_idx
+        
+        latent_slice = resolved[:, :, f_idx:end_idx, :, :].cuda()
+        latent_slice_flat = einops.rearrange(latent_slice, 'b c t h w -> (b t) c h w')
+        
         with torch.inference_mode():
             with torch.autocast("cuda", dtype=torch.float16):
-                decoded = denoising_model.decode_first_stage(frame_latent_flat, num_video_frames=1)
+                decoded_flat = denoising_model.decode_first_stage(latent_slice_flat, num_video_frames=cur_n_gen)
+        
+        decoded_slice = einops.rearrange(decoded_flat, '(b t) c h w -> b c t h w', b=1, t=cur_n_gen).cpu()
+        resolved_pixels_list.append(decoded_slice)
+        
+        decode_pbar.update(1)
+        del latent_slice, latent_slice_flat, decoded_flat, decoded_slice
 
-        frame_numpy = decoded[0].detach().cpu().float().numpy().transpose(1, 2, 0)
+    decode_pbar.close()
+    
+    resolved_pixels = torch.cat(resolved_pixels_list, dim=2)
+
+    new_overlap_buffer = []
+
+    # Now stream the resolved pixels to ffmpeg
+    for f_rel in range(0, actual_len):
+        frame_tensor = resolved_pixels[0, :, f_rel, :, :]
+        frame_numpy = frame_tensor.float().numpy().transpose(1, 2, 0)
         frame_numpy_uint8 = (((frame_numpy + 1) / 2).clip(0, 1) * 255).astype(np.uint8)
         
         abs_idx = abs_start + f_rel
@@ -368,12 +400,10 @@ for ci, chunk_info in enumerate(tqdm(chunk_schedule, desc="Temporal Chunks")):
             reprojected[:, abs_idx] = torch.tensor(final_frame).permute(2, 0, 1)
             reprojected_mask[:, abs_idx] = -1.0  # mark as unmasked
 
-        del decoded, frame_latent, frame_latent_flat
-
     first_stage_model.to('cpu')
     torch.cuda.empty_cache()
     process.stdin.flush()
-    del resolved
+    del resolved, resolved_pixels
     overlap_buffer = new_overlap_buffer
 
 process.stdin.close()

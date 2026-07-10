@@ -48,6 +48,8 @@ def process_video_with_depth(
     blur_left_mix=0.5,
     use_cuda=False,
     micro_hole_strength=0,
+    use_gapw=False,
+    gapw_delta=1.5,
 ):
     # Probe input video
     probe = ffmpeg.probe(video_path)
@@ -184,7 +186,8 @@ def process_video_with_depth(
         for left_frame, disparity in zip(left_frames, disparities):
             reprojected_image, inpainting_mask, _ = scatter_image(
                 left_frame, disparity, direction=-1, scale_factor=1, reproject_depth=True, use_cuda=use_cuda,
-                close_micro_holes=(micro_hole_strength > 0), micro_hole_iters=micro_hole_strength
+                close_micro_holes=(micro_hole_strength > 0), micro_hole_iters=micro_hole_strength,
+                use_gapw=use_gapw, gapw_delta=gapw_delta
             )
             reprojected_right_videos.append(reprojected_image)
             reprojected_right_masks.append(inpainting_mask)
@@ -274,6 +277,8 @@ if __name__ == "__main__":
     parser.add_argument("--blur_left_mix", type=float, default=0.5, help="H/V balance for blur_left (0=H, 1=V).")
     parser.add_argument("--use_cuda", action="store_true", help="Use CuPy GPU-accelerated warping (falls back to NumPy if unavailable).")
     parser.add_argument("--micro_hole_strength", type=float, default=0.0, help="Strength of morphological closing for small holes (0=off, 1-5=iterations, supports fractions like 0.5).")
+    parser.add_argument("--use_gapw", action="store_true", help="Use Gradient-Aware Parallax Warping.")
+    parser.add_argument("--gapw_delta", type=float, default=1.5, help="Delta threshold for GAPW mask generation.")
 
     args = parser.parse_args()
 
@@ -303,4 +308,6 @@ if __name__ == "__main__":
         blur_left_mix=args.blur_left_mix,
         use_cuda=args.use_cuda,
         micro_hole_strength=args.micro_hole_strength,
+        use_gapw=args.use_gapw,
+        gapw_delta=args.gapw_delta,
     )

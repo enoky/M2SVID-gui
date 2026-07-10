@@ -70,6 +70,7 @@ class VideoLDM(DiffusionEngine):
             gt_video_sampling_exp_scale=1.0,
 
             apply_loss_on_images = False,
+            load_metrics = True,
             *args,
             **kwargs
         ):
@@ -88,9 +89,11 @@ class VideoLDM(DiffusionEngine):
         self.gt_video_sampling_exp_scale = gt_video_sampling_exp_scale
         self.cond_randomly_gt_frames_in_reprojected_video = cond_randomly_gt_frames_in_reprojected_video
 
-        self.additional_metric = {
-            'lpips':  LPIPS().eval()
-        }
+        self.additional_metric = {}
+        if load_metrics:
+            self.additional_metric = {
+                'lpips':  LPIPS().eval()
+            }
 
     def init_from_ckpt(
         self,

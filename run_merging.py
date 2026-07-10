@@ -354,14 +354,14 @@ def run_batch_process(settings, single_video_path=None):
                     if s["mask_blur_kernel_size"] > 0:
                         processed_mask = apply_gaussian_blur(processed_mask, s["mask_blur_kernel_size"], use_gpu)
 
-                    if s["shadow_shift"] > 0:
+                    shadow_s = int(s.get("shadow_shift", 0))
+                    if shadow_s > 0:
                         processed_mask = apply_shadow_blur(
-                            processed_mask,
-                            s["shadow_shift"],
-                            float(s.get("shadow_start_opacity") or 0.7),
-                            float(s.get("shadow_opacity_decay") or 0.1),
-                            float(s.get("shadow_min_opacity") or 0.0),
-                            float(s.get("shadow_decay_gamma") or 1.0),
+                            processed_mask, shadow_s,
+                            float(s.get("shadow_start_opacity", 0.7)),
+                            float(s.get("shadow_opacity_decay", 0.1)),
+                            float(s.get("shadow_min_opacity", 0.0)),
+                            float(s.get("shadow_decay_gamma", 1.0)),
                             use_gpu,
                         )
 
@@ -385,7 +385,7 @@ def run_batch_process(settings, single_video_path=None):
                     convergence = int(s.get("convergence", 0))
                     conv_mode = s.get("convergence_mode", "Black Bars")
 
-                    if convergence != 0:
+                    if conv_mode != "Disable" and convergence != 0:
                         # Balanced shift: right moves +C/2, left moves -C/2 (approx)
                         # We ensure (shift_r - shift_l) == convergence
                         shift_r = convergence // 2

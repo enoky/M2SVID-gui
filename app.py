@@ -231,6 +231,8 @@ def default_gui_settings():
             "dilate_left": 0.0,
             "blur_left": 0,
             "blur_left_mix": 0.5,
+            "use_gapw": False,
+            "gapw_delta": 1.5,
             "preview_source": "Reprojected Right",
             "frame_slider": 0,
         },
@@ -318,6 +320,7 @@ def pack_gui_settings_dict(args_tuple):
         w_input_folder, w_depth_folder, w_disparity, w_lefteye_folder, w_hires_folder, w_lowres_folder,
         w_high_batch, w_high_res, w_enable_low, w_reverse_out, w_low_batch, w_low_res, w_use_cuda, w_micro_hole_strength,
         w_dilate_x, w_dilate_y, w_blur_x, w_blur_y, w_dilate_left, w_blur_left, w_blur_left_mix,
+        w_use_gapw, w_gapw_delta,
         w_preview_source, w_frame_slider,
         i_lefteye_folder, i_grid_folder, i_output_folder,
         i_model_variant, i_mask_antialias, i_tile_size, i_tile_overlap, i_chunk_size, i_overlap, i_original_input_blend_strength,
@@ -352,6 +355,8 @@ def pack_gui_settings_dict(args_tuple):
             "dilate_left": w_dilate_left,
             "blur_left": w_blur_left,
             "blur_left_mix": w_blur_left_mix,
+            "use_gapw": w_use_gapw,
+            "gapw_delta": w_gapw_delta,
             "preview_source": w_preview_source,
             "frame_slider": w_frame_slider,
         },
@@ -522,7 +527,8 @@ def process_warping(
     reverse_output=False, conflict_policy="skip",
     dilate_x=0.0, dilate_y=0.0, blur_x=0, blur_y=0,
     dilate_left=0.0, blur_left=0, blur_left_mix=0.5,
-    use_cuda=False, micro_hole_strength=0
+    use_cuda=False, micro_hole_strength=0,
+    use_gapw=False, gapw_delta=1.5
 ):
     if not input_folder or not os.path.isdir(input_folder):
         yield 0, 0, "Input folder does not exist.", "Error"
@@ -586,6 +592,8 @@ def process_warping(
                     active_blur_left_mix = s.get("blur_left_mix", blur_left_mix)
                     active_use_cuda = s.get("use_cuda", use_cuda)
                     active_micro_hole_strength = s.get("micro_hole_strength", micro_hole_strength)
+                    active_use_gapw = s.get("use_gapw", use_gapw)
+                    active_gapw_delta = s.get("gapw_delta", gapw_delta)
             except Exception as e:
                 logger.error(f"Error loading sidecar for {filename}: {e}")
         else:
@@ -598,6 +606,8 @@ def process_warping(
             active_blur_left_mix = blur_left_mix
             active_use_cuda = use_cuda
             active_micro_hole_strength = micro_hole_strength
+            active_use_gapw = use_gapw
+            active_gapw_delta = gapw_delta
 
         # Conflict Check
         left_eye_out = os.path.join(left_eye_folder, f"{base_name}_lefteye.mp4")
@@ -676,6 +686,9 @@ def process_warping(
             cmd_warp_high.append("--use_cuda")
         if active_micro_hole_strength > 0:
             cmd_warp_high.extend(["--micro_hole_strength", str(active_micro_hole_strength)])
+        if active_use_gapw:
+            cmd_warp_high.append("--use_gapw")
+            cmd_warp_high.extend(["--gapw_delta", str(active_gapw_delta)])
         for sub_perc, desc in run_subprocess_with_progress(cmd_warp_high, env_vars, f"High Res Warping"):
             yield file_perc, sub_perc, f"File {i+1}/{total_files} | {filename} - {desc}", "Running"
 
@@ -705,6 +718,9 @@ def process_warping(
                 cmd_warp_low.append("--use_cuda")
             if active_micro_hole_strength > 0:
                 cmd_warp_low.extend(["--micro_hole_strength", str(active_micro_hole_strength)])
+            if active_use_gapw:
+                cmd_warp_low.append("--use_gapw")
+                cmd_warp_low.extend(["--gapw_delta", str(active_gapw_delta)])
             for sub_perc, desc in run_subprocess_with_progress(cmd_warp_low, env_vars, f"Low Res Warping"):
                 yield file_perc, sub_perc, f"File {i+1}/{total_files} | {filename} - {desc}", "Running"
 
@@ -726,7 +742,7 @@ def process_warping(
 def process_inpainting(
     left_eye_folder, grid_folder, output_folder,
     mask_antialias, tile_size, tile_overlap, chunk_size, overlap, original_input_blend_strength,
-    model_variant, conflict_policy="skip"
+    model_variant, inference_steps=1, conflict_policy="skip"
 ):
     if not left_eye_folder or not os.path.isdir(left_eye_folder):
         yield 0, 0, 0, "Left Eye folder does not exist.", "Error"
@@ -807,7 +823,8 @@ def process_inpainting(
             "--overlap", str(overlap),
             "--original_input_blend_strength", str(original_input_blend_strength),
             "--model_config", model_config,
-            "--ckpt", ckpt
+            "--ckpt", ckpt,
+            "--steps", str(int(inference_steps))
         ]
         
         temp_perc = 0
@@ -877,7 +894,7 @@ def process_merging(
         "shadow_opacity_decay": float(shadow_opacity_decay if shadow_opacity_decay is not None else 0.4),
         "shadow_min_opacity": float(shadow_min_opacity if shadow_min_opacity is not None else 0.4),
         "shadow_decay_gamma": float(shadow_decay_gamma if shadow_decay_gamma is not None else 1.0),
-        "convergence": int(convergence or 35),
+        "convergence": int(convergence if convergence is not None else 35),
         "convergence_mode": convergence_mode,
         "encoding_quality": "Medium",
         "encoding_tune": "None",
@@ -990,12 +1007,15 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     with gr.Row():
                         w_dilate_left = gr.Slider(minimum=0.0, maximum=20.0, value=0.0, step=0.5, label="Dilate Left")
                         w_blur_left = gr.Slider(minimum=0, maximum=20, value=0, step=1, label="Blur Left")
-                    w_blur_left_mix = gr.Dropdown(
-                        label="Blur Left Mix (H↔V)",
-                        choices=[round(i/10, 1) for i in range(0, 11)],
-                        value=0.5,
-                        allow_custom_value=True
-                    )
+                    with gr.Row():
+                        w_blur_left_mix = gr.Dropdown(
+                            label="Blur Left Mix (H↔V)",
+                            choices=[round(i/10, 1) for i in range(0, 11)],
+                            value=0.5,
+                            allow_custom_value=True
+                        )
+                        w_use_gapw = gr.Checkbox(label="Enable GAPW (Gradient-Aware Parallax Warping)", value=False)
+                        w_gapw_delta = gr.Slider(minimum=0.0, maximum=5.0, value=1.5, step=0.1, label="GAPW Delta Threshold")
                     
             gr.Markdown("---")
             gr.Markdown("### Video Preview & Selection")
@@ -1065,7 +1085,8 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             )
 
             def do_preview_warping(video_list, selected_video, frame_idx, preview_source, disparity_perc,
-                                   dilate_x, dilate_y, blur_x, blur_y, dilate_left, blur_left, blur_left_mix, use_cuda, micro_hole_strength):
+                                   dilate_x, dilate_y, blur_x, blur_y, dilate_left, blur_left, blur_left_mix, use_cuda, micro_hole_strength,
+                                   use_gapw, gapw_delta):
                 if not video_list or not selected_video:
                     return None, 0
                 
@@ -1090,6 +1111,8 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     "blur_left_mix": float(blur_left_mix),
                     "use_cuda": bool(use_cuda),
                     "micro_hole_strength": float(micro_hole_strength),
+                    "use_gapw": bool(use_gapw),
+                    "gapw_delta": float(gapw_delta),
                 }
                 print(f" [GUI] Preview mode: {'CUDA' if use_cuda else 'CPU'}")
                 try:
@@ -1101,7 +1124,8 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
 
             _w_preview_inputs = [
                 w_video_list_state, w_video_dropdown, w_frame_slider, w_preview_source, w_disparity,
-                w_dilate_x, w_dilate_y, w_blur_x, w_blur_y, w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda, w_micro_hole_strength
+                w_dilate_x, w_dilate_y, w_blur_x, w_blur_y, w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda, w_micro_hole_strength,
+                w_use_gapw, w_gapw_delta
             ]
 
             w_preview_btn.click(
@@ -1113,7 +1137,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             # Auto-preview on param change
             for _ctrl in [w_disparity, w_preview_source, w_frame_slider,
                           w_dilate_x, w_dilate_y, w_blur_x, w_blur_y,
-                          w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda, w_micro_hole_strength]:
+                          w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda, w_micro_hole_strength, w_use_gapw, w_gapw_delta]:
                 _ctrl.change(
                     fn=do_preview_warping,
                     inputs=_w_preview_inputs,
@@ -1123,7 +1147,8 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             # Save/Load per-video settings
             def save_video_settings_warping(video_list, selected_video, disparity_perc,
                                             dilate_x, dilate_y, blur_x, blur_y,
-                                            dilate_left, blur_left, blur_left_mix, use_cuda, micro_hole_strength):
+                                            dilate_left, blur_left, blur_left_mix, use_cuda, micro_hole_strength,
+                                            use_gapw, gapw_delta):
                 if not video_list or not selected_video: return "No video selected."
                 video_info = next((v for v in video_list if v["base_name"] == selected_video), None)
                 if not video_info: return "Video not found."
@@ -1139,6 +1164,8 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     "blur_left_mix": float(blur_left_mix),
                     "use_cuda": bool(use_cuda),
                     "micro_hole_strength": float(micro_hole_strength),
+                    "use_gapw": bool(use_gapw),
+                    "gapw_delta": float(gapw_delta),
                 }
                 sidecar_path = os.path.splitext(video_info["video"])[0] + ".warpsettings.json"
                 with open(sidecar_path, "w") as f:
@@ -1149,20 +1176,20 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 fn=save_video_settings_warping,
                 inputs=[w_video_list_state, w_video_dropdown, w_disparity,
                         w_dilate_x, w_dilate_y, w_blur_x, w_blur_y,
-                        w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda, w_micro_hole_strength],
+                        w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda, w_micro_hole_strength, w_use_gapw, w_gapw_delta],
                 outputs=[w_settings_status]
             )
 
             def load_video_settings_warping(video_list, selected_video):
                 if not video_list or not selected_video:
-                    return [gr.update()] * 10 + ["No video selected."]
+                    return [gr.update()] * 12 + ["No video selected."]
                 video_info = next((v for v in video_list if v["base_name"] == selected_video), None)
                 if not video_info:
-                    return [gr.update()] * 10 + ["Video not found."]
+                    return [gr.update()] * 12 + ["Video not found."]
                 
                 sidecar_path = os.path.splitext(video_info["video"])[0] + ".warpsettings.json"
                 if not os.path.exists(sidecar_path):
-                    return [gr.update()] * 10 + [f"No saved settings found for {selected_video}"]
+                    return [gr.update()] * 12 + [f"No saved settings found for {selected_video}"]
                 
                 try:
                     with open(sidecar_path, "r") as f:
@@ -1178,16 +1205,18 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                         s.get("blur_left_mix", gr.update()),
                         s.get("use_cuda", gr.update()),
                         s.get("micro_hole_strength", gr.update()),
+                        s.get("use_gapw", gr.update()),
+                        s.get("gapw_delta", gr.update()),
                         f"✅ Loaded settings from {os.path.basename(sidecar_path)}"
                     ]
                 except Exception as e:
-                    return [gr.update()] * 10 + [f"Error loading settings: {e}"]
+                    return [gr.update()] * 12 + [f"Error loading settings: {e}"]
 
             w_load_settings_btn.click(
                 fn=load_video_settings_warping,
                 inputs=[w_video_list_state, w_video_dropdown],
                 outputs=[w_disparity, w_dilate_x, w_dilate_y, w_blur_x, w_blur_y,
-                         w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda, w_micro_hole_strength, w_settings_status]
+                         w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda, w_micro_hole_strength, w_use_gapw, w_gapw_delta, w_settings_status]
             )
 
             # Auto-preview & Load on video choice
@@ -1195,18 +1224,18 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 fn=load_video_settings_warping,
                 inputs=[w_video_list_state, w_video_dropdown],
                 outputs=[w_disparity, w_dilate_x, w_dilate_y, w_blur_x, w_blur_y,
-                         w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda, w_micro_hole_strength, w_settings_status]
+                         w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda, w_micro_hole_strength, w_use_gapw, w_gapw_delta, w_settings_status]
             ).then(
                 fn=do_preview_warping,
                 inputs=[w_video_list_state, w_video_dropdown, gr.State(0), w_preview_source, w_disparity,
-                        w_dilate_x, w_dilate_y, w_blur_x, w_blur_y, w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda, w_micro_hole_strength],
+                        w_dilate_x, w_dilate_y, w_blur_x, w_blur_y, w_dilate_left, w_blur_left, w_blur_left_mix, w_use_cuda, w_micro_hole_strength, w_use_gapw, w_gapw_delta],
                 outputs=[w_preview_image, w_frame_slider]
             )
 
             def start_warping_flow(
                 input_f, depth_f, lefteye_f, hires_f, lowres_f,
                 disparity, high_batch, high_res, enable_low, low_batch, low_res,
-                reverse_out, use_cuda, micro_hole_strength, *_depth_args
+                reverse_out, use_cuda, micro_hole_strength, use_gapw, gapw_delta, *_depth_args
             ):
                 # 1. Validation
                 if not input_f or not os.path.isdir(input_f):
@@ -1252,7 +1281,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 has_conflicts,
                 input_folder, depth_folder, left_eye_folder, high_res_folder, low_res_folder,
                 disparity_perc, high_batch, high_res, enable_low_res, low_batch, low_res,
-                reverse_output, use_cuda, micro_hole_strength, dilate_x=0.0, dilate_y=0.0, blur_x=0, blur_y=0,
+                reverse_output, use_cuda, micro_hole_strength, use_gapw, gapw_delta, dilate_x=0.0, dilate_y=0.0, blur_x=0, blur_y=0,
                 dilate_left=0.0, blur_left=0, blur_left_mix=0.5, conflict_policy="skip"
             ):
                 if has_conflicts:
@@ -1287,7 +1316,8 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     reverse_output=reverse_output, conflict_policy=conflict_policy,
                     dilate_x=dilate_x, dilate_y=dilate_y, blur_x=blur_x, blur_y=blur_y,
                     dilate_left=dilate_left, blur_left=blur_left, blur_left_mix=blur_left_mix,
-                    use_cuda=use_cuda, micro_hole_strength=micro_hole_strength
+                    use_cuda=use_cuda, micro_hole_strength=micro_hole_strength,
+                    use_gapw=use_gapw, gapw_delta=gapw_delta
                 ):
                     yield make_progress_html(f_perc, "Overall File Progress (%)"), make_progress_html(s_perc, "Current Stage Progress (%)"), p_text, p_stat
 
@@ -1295,7 +1325,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             _w_inputs = [
                 w_input_folder, w_depth_folder, w_lefteye_folder, w_hires_folder, w_lowres_folder,
                 w_disparity, w_high_batch, w_high_res, w_enable_low, w_low_batch, w_low_res,
-                w_reverse_out, w_use_cuda, w_micro_hole_strength,
+                w_reverse_out, w_use_cuda, w_micro_hole_strength, w_use_gapw, w_gapw_delta,
                 w_dilate_x, w_dilate_y, w_blur_x, w_blur_y,
                 w_dilate_left, w_blur_left, w_blur_left_mix
             ]
@@ -1352,6 +1382,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     i_chunk_size = gr.Number(label="Chunk Size (frames per pass, max 25)", value=25, precision=0)
                     i_overlap = gr.Number(label="Overlap (Temporal Crossfade)", value=3, precision=0)
                     i_original_input_blend_strength = gr.Number(label="Original Input Blend Strength (Context)", value=0.0, step=0.1)
+                    i_inference_steps = gr.Number(label="Inference Steps (1=Default, 2=Better Quality)", value=1, precision=0)
                     
             with gr.Row():
                 i_file_prog = gr.HTML(value=make_progress_html(0, "Overall File Progress (%)"))
@@ -1379,7 +1410,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             def start_inpainting_flow(
                 left_eye_f, grid_f, output_f,
                 mask_antialias, tile_size, tile_overlap, chunk_size, overlap, blend_strength,
-                model_variant
+                model_variant, inference_steps
             ):
                 if not left_eye_f or not os.path.isdir(left_eye_f):
                     return { i_output: "Error: Left Eye folder invalid.", i_has_conflicts: False }
@@ -1412,7 +1443,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 has_conflicts,
                 left_eye_folder, grid_folder, output_folder,
                 mask_antialias, tile_size, tile_overlap, chunk_size, overlap, blend_strength,
-                model_variant, conflict_policy="skip"
+                model_variant, inference_steps, conflict_policy="skip"
             ):
                 if has_conflicts:
                     return
@@ -1427,7 +1458,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 for f_perc, t_perc, s_perc, p_text, p_stat in process_inpainting(
                     left_eye_folder, grid_folder, output_folder,
                     mask_antialias, tile_size, tile_overlap, chunk_size, overlap, blend_strength,
-                    model_variant, conflict_policy=conflict_policy
+                    model_variant, inference_steps, conflict_policy=conflict_policy
                 ):
                     yield make_progress_html(f_perc, "Overall File Progress (%)"), make_progress_html(t_perc, "Temporal Chunks Progress (%)"), make_progress_html(s_perc, "Spatial Tiles Progress (%)"), p_text, p_stat
 
@@ -1435,7 +1466,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             _i_inputs = [
                 i_lefteye_folder, i_grid_folder, i_output_folder,
                 i_mask_antialias, i_tile_size, i_tile_overlap, i_chunk_size, i_overlap, i_original_input_blend_strength,
-                i_model_variant
+                i_model_variant, i_inference_steps
             ]
 
             i_btn.click(
@@ -1507,8 +1538,9 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     with gr.Row():
                         m_convergence_mode = gr.Dropdown(
                             label="Convergence Mode",
-                            choices=["Black Bars", "Reflect Padding", "Auto-Zoom"],
-                            value="Auto-Zoom"
+                            choices=["Disable", "Black Bars", "Reflect Padding", "Auto-Zoom"],
+                            value="Auto-Zoom",
+                            interactive=True
                         )
                     with gr.Row():
                         m_codec = gr.Dropdown(label="FFmpeg Codec", choices=["Auto", "H.264", "H.265"], value="H.265")
@@ -1941,6 +1973,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
         w_input_folder, w_depth_folder, w_disparity, w_lefteye_folder, w_hires_folder, w_lowres_folder,
         w_high_batch, w_high_res, w_enable_low, w_reverse_out, w_low_batch, w_low_res, w_use_cuda, w_micro_hole_strength,
         w_dilate_x, w_dilate_y, w_blur_x, w_blur_y, w_dilate_left, w_blur_left, w_blur_left_mix,
+        w_use_gapw, w_gapw_delta,
         w_preview_source, w_frame_slider,
         i_lefteye_folder, i_grid_folder, i_output_folder,
         i_model_variant, i_mask_antialias, i_tile_size, i_tile_overlap, i_chunk_size, i_overlap, i_original_input_blend_strength,
@@ -1959,6 +1992,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             w["input_folder"], w["depth_folder"], w["disparity"], w["lefteye_folder"], w["hires_folder"], w["lowres_folder"],
             w["high_batch"], w["high_res"], w["enable_low"], w["reverse_out"], w["low_batch"], w["low_res"], w["use_cuda"], w.get("micro_hole_strength", 0.0),
             w["dilate_x"], w["dilate_y"], w["blur_x"], w["blur_y"], w["dilate_left"], w["blur_left"], w["blur_left_mix"],
+            w.get("use_gapw", False), w.get("gapw_delta", 1.5),
             w["preview_source"], w["frame_slider"],
             i["lefteye_folder"], i["grid_folder"], i["output_folder"],
             i["model_variant"], i["mask_antialias"], i["tile_size"], i["tile_overlap"], i["chunk_size"], i["overlap"], i["original_input_blend_strength"],

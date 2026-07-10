@@ -27,7 +27,8 @@ model:
     cond_reprojected_video: True
 
     clip_condition_all_frames: True
-    apply_loss_on_images: True
+    apply_loss_on_images: False
+    load_metrics: False
 
     denoiser_config:
       target: sgm.modules.diffusionmodules.denoiser.Denoiser
@@ -199,19 +200,19 @@ model:
             dropout: 0.0
             video_kernel_size: [3, 1, 1]
 
-    loss_fn_config:
-      target:  m2svid.models_for_sgm.one_step_model_utils.OneStepLoss
-      params:
-        loss_type: 'l2'
-        image_loss_types: ['lpips', 'l1']
-        num_frames: 25
-        batch2model_keys: [num_video_frames, image_only_indicator, inpainting_mask]
-        sigma_sampler_config:
-          target: m2svid.models_for_sgm.one_step_model_utils.OneStepSampling
-          params:
-            sigma: 700.0
-        loss_weighting_config:
-          target: sgm.modules.diffusionmodules.loss_weighting.VWeighting
+    # loss_fn_config:
+    #   target:  m2svid.models_for_sgm.one_step_model_utils.OneStepLoss
+    #   params:
+    #     loss_type: 'l2'
+    #     image_loss_types: ['lpips', 'l1']
+    #     num_frames: 25
+    #     batch2model_keys: [num_video_frames, image_only_indicator, inpainting_mask]
+    #     sigma_sampler_config:
+    #       target: m2svid.models_for_sgm.one_step_model_utils.OneStepSampling
+    #       params:
+    #         sigma: 700.0
+    #     loss_weighting_config:
+    #       target: sgm.modules.diffusionmodules.loss_weighting.VWeighting
 
     sampler_config:
       target: sgm.modules.diffusionmodules.sampling.EulerEDMSampler

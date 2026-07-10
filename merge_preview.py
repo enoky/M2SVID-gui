@@ -292,10 +292,10 @@ def generate_preview_frame(video_info, settings, frame_index=0):
     if shadow_s > 0:
         processed_mask = apply_shadow_blur(
             processed_mask, shadow_s,
-            float(settings.get("shadow_start_opacity") or 0.7),
-            float(settings.get("shadow_opacity_decay") or 0.1),
-            float(settings.get("shadow_min_opacity") or 0.0),
-            float(settings.get("shadow_decay_gamma") or 1.0),
+            float(settings.get("shadow_start_opacity", 0.7)),
+            float(settings.get("shadow_opacity_decay", 0.1)),
+            float(settings.get("shadow_min_opacity", 0.0)),
+            float(settings.get("shadow_decay_gamma", 1.0)),
             use_gpu,
         )
 
@@ -317,7 +317,7 @@ def generate_preview_frame(video_info, settings, frame_index=0):
     convergence = int(settings.get("convergence", 0))
     conv_mode = settings.get("convergence_mode", "Black Bars")
 
-    if convergence != 0:
+    if conv_mode != "Disable" and convergence != 0:
         # Balanced shift: right moves +C/2, left moves -C/2 (approx)
         # We ensure (shift_r - shift_l) == convergence
         shift_r = convergence // 2

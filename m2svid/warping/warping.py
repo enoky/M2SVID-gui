@@ -59,6 +59,8 @@ def _scatter_numpy(
     reproject_depth: bool = False,
     close_micro_holes: bool = False,
     micro_hole_iters: float = 1.0,
+    use_gapw: bool = False,
+    gapw_delta: float = 1.5,
 ):
   global _WARP_FRAME_COUNT_CPU
   import time
@@ -111,6 +113,23 @@ def _scatter_numpy(
   reproj_img_weight[valid_y1, reproj_valid_x_coords_plus1] += w1[:, None]
 
   filled_pixel_mask[(reproj_img_weight != 0)[:, :, 0]] = 1
+
+  if use_gapw:
+      d_disp_dx = np.gradient(disparity_map, axis=1)
+      dx_prime_dx = 1.0 + d_disp_dx * direction
+      gapw_mask_src = (np.abs(dx_prime_dx) > gapw_delta).astype(np.float32)
+      
+      target_gapw_mask = np.zeros((h, w), dtype=np.float32)
+      target_gapw_mask[valid_y, reproj_valid_x_coords] += gapw_mask_src[valid_y, valid_x] * w0
+      target_gapw_mask[valid_y1, reproj_valid_x_coords_plus1] += gapw_mask_src[valid_y1, valid_x1] * w1
+      
+      gapw_holes = target_gapw_mask > 0.1
+      num_gapw = np.sum(gapw_holes)
+      print(f" [GAPW NumPy] Masked {num_gapw} pixels. Delta: {gapw_delta}")
+      filled_pixel_mask[gapw_holes] = False
+      reproj_img_weight[gapw_holes] = 0
+      reproj_img[gapw_holes] = 0
+
   reproj_img[reproj_img_weight != 0] /= reproj_img_weight[
       reproj_img_weight != 0
   ]
@@ -206,6 +225,8 @@ def _scatter_cupy(
     reproject_depth: bool = False,
     close_micro_holes: bool = False,
     micro_hole_iters: float = 1.0,
+    use_gapw: bool = False,
+    gapw_delta: float = 1.5,
 ):
   h, w = input_frame.shape[:2]
   
@@ -281,6 +302,26 @@ def _scatter_cupy(
 
   filled_pixel_mask = cp.zeros((h, w)).astype(bool)
   filled_pixel_mask[(reproj_img_weight != 0)[:, :, 0]] = 1
+
+  if use_gapw:
+      d_disp_dx = cp.zeros_like(disparity_map)
+      d_disp_dx[:, 1:-1] = (disparity_map[:, 2:] - disparity_map[:, :-2]) / 2.0
+      d_disp_dx[:, 0] = disparity_map[:, 1] - disparity_map[:, 0]
+      d_disp_dx[:, -1] = disparity_map[:, -1] - disparity_map[:, -2]
+      
+      dx_prime_dx = 1.0 + d_disp_dx * direction
+      gapw_mask_src = (cp.abs(dx_prime_dx) > gapw_delta).astype(cp.float32)
+      
+      target_gapw_mask = cp.zeros((h, w), dtype=cp.float32)
+      target_gapw_mask[valid_y, reproj_valid_x_coords] += gapw_mask_src[valid_y, valid_x] * w0
+      target_gapw_mask[valid_y1, reproj_valid_x_coords_plus1] += gapw_mask_src[valid_y1, valid_x1] * w1
+      
+      gapw_holes = target_gapw_mask > 0.1
+      num_gapw = int(cp.sum(gapw_holes))
+      print(f" [GAPW CuPy] Masked {num_gapw} pixels. Delta: {gapw_delta}, Max grad: {float(cp.max(cp.abs(dx_prime_dx)))}")
+      filled_pixel_mask[gapw_holes] = False
+      reproj_img_weight[gapw_holes] = 0
+      reproj_img[gapw_holes] = 0
 
   mask_weight_nz = reproj_img_weight != 0
   reproj_img[mask_weight_nz] /= reproj_img_weight[mask_weight_nz]
@@ -402,6 +443,8 @@ def scatter_image(
     use_cuda: bool = False,
     close_micro_holes: bool = False,
     micro_hole_iters: float = 1.0,
+    use_gapw: bool = False,
+    gapw_delta: float = 1.5,
 ):
   """Scatter-based image reprojection using depth.
 
@@ -433,6 +476,8 @@ def scatter_image(
           reproject_depth,
           close_micro_holes,
           micro_hole_iters,
+          use_gapw,
+          gapw_delta,
       )
     except cp.cuda.memory.OutOfMemoryError:
       print(" [Warp] !! GPU Out of Memory !! Falling back to NumPy (CPU)...")
@@ -445,6 +490,8 @@ def scatter_image(
           reproject_depth,
           close_micro_holes,
           micro_hole_iters,
+          use_gapw,
+          gapw_delta,
       )
   else:
     return _scatter_numpy(
@@ -456,4 +503,6 @@ def scatter_image(
         reproject_depth,
         close_micro_holes,
         micro_hole_iters,
+        use_gapw,
+        gapw_delta,
     )
