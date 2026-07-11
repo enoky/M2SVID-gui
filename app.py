@@ -500,6 +500,80 @@ def run_subprocess_with_progress(cmd, env, progress_desc="Processing"):
         error_msg = "\n".join(full_log[-20:]) # Get last 20 lines of log
         raise Exception(f"Command failed with code {process.returncode}:\n{error_msg}")
 
+def wait_for_worker_ready(worker_process, timeout=300):
+    """Block until the worker subprocess prints ###WORKER_READY### or the process dies.
+    Returns True on success, raises Exception on failure."""
+    import time
+    start = time.time()
+    buffer = ""
+    while True:
+        if time.time() - start > timeout:
+            worker_process.kill()
+            raise Exception(f"Worker failed to become ready within {timeout}s")
+        char = worker_process.stdout.read(1)
+        if not char:
+            if worker_process.poll() is not None:
+                raise Exception("Worker process exited before becoming ready")
+            continue
+        if char in ['\r', '\n']:
+            if "###WORKER_READY###" in buffer:
+                return True
+            buffer = ""
+        else:
+            buffer += char
+
+def run_worker_job_with_progress(worker_process, job_dict, progress_desc="Processing"):
+    """Send a JSON job to a persistent worker and yield progress until JOB_COMPLETE/JOB_FAILED.
+    
+    Same yield signature as run_subprocess_with_progress: (percent, description).
+    """
+    # Send job as a single JSON line
+    job_line = json.dumps(job_dict) + "\n"
+    worker_process.stdin.write(job_line)
+    worker_process.stdin.flush()
+    
+    percent_re = re.compile(r'(\d+)%\|')
+    
+    buffer = ""
+    full_log = []
+    last_perc = 0
+    while True:
+        char = worker_process.stdout.read(1)
+        if not char:
+            if worker_process.poll() is not None:
+                error_msg = "\n".join(full_log[-20:])
+                raise Exception(f"Worker process died unexpectedly:\n{error_msg}")
+            continue
+        if char in ['\r', '\n']:
+            if buffer:
+                # Check for protocol signals
+                if "###JOB_COMPLETE###" in buffer:
+                    buffer = ""
+                    return  # Job finished successfully
+                if "###JOB_FAILED###" in buffer:
+                    # Extract error message between ###JOB_FAILED### and trailing ###
+                    err = buffer.replace("###JOB_FAILED###", "").rstrip("#")
+                    raise Exception(f"Worker job failed: {err}")
+                
+                full_log.append(buffer)
+                match = percent_re.search(buffer)
+                if match:
+                    last_perc = int(match.group(1))
+                
+                desc = progress_desc
+                if ":" in buffer:
+                    desc_part = buffer.split(":")[0].strip()
+                    desc_part = re.sub(r'[^a-zA-Z0-9\s\-/.]', '', desc_part)
+                    desc = f"{progress_desc} - {desc_part}"
+                else:
+                    clean_buffer = re.sub(r'[^a-zA-Z0-9\s\-/.]', '', buffer)
+                    desc = f"{progress_desc} - {clean_buffer}"
+                    
+                yield last_perc, desc
+            buffer = ""
+        else:
+            buffer += char
+
 def reverse_video(path):
     """Reverses a video file using FFmpeg's reverse filter."""
     if not os.path.exists(path):
@@ -766,86 +840,115 @@ def process_inpainting(
         yield 0, 0, 0, "No *_lefteye.mp4 files found in Left Eye Folder.", "Error"
         return
 
-    for i, left_eye_path in enumerate(left_eye_files):
-        file_perc = int((i / total_files) * 100)
-        filename = os.path.basename(left_eye_path)
-        base_name = filename.replace("_lefteye.mp4", "")
-        
-        # Conflict Check
-        pattern = os.path.join(output_folder, f"{base_name}_*_inpainted_right_eye.mp4")
-        existing_outputs = glob.glob(pattern)
-        if existing_outputs:
-            if conflict_policy == "skip":
-                yield file_perc, 100, 100, f"Skipping {filename} (Inpainted output already exists)", "Running"
+    # Determine model config/ckpt once (same for all clips in a batch)
+    if "Option 2" in model_variant:
+        model_config = "configs/m2svid_no_fullatten.yaml"
+        ckpt = "ckpts/m2svid_no_full_atten_weights.pt"
+    else:
+        model_config = "configs/m2svid.yaml"
+        ckpt = "ckpts/m2svid_weights.pt"
+
+    # Launch persistent worker subprocess (R1: model loads only once)
+    cmd_worker = [
+        sys.executable, "inpaint_and_refine.py",
+        "--worker",
+        "--model_config", model_config,
+        "--ckpt", ckpt,
+        "--steps", str(int(inference_steps))
+    ]
+    
+    worker = None
+    try:
+        yield 0, 0, 0, "Loading inpainting model (one-time)...", "Running"
+        worker = subprocess.Popen(
+            cmd_worker, env=inpaint_env,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            universal_newlines=True, errors='replace',
+            bufsize=1
+        )
+        wait_for_worker_ready(worker)
+        yield 0, 0, 0, "Model loaded. Starting batch processing...", "Running"
+
+        for i, left_eye_path in enumerate(left_eye_files):
+            file_perc = int((i / total_files) * 100)
+            filename = os.path.basename(left_eye_path)
+            base_name = filename.replace("_lefteye.mp4", "")
+            
+            # Conflict Check
+            pattern = os.path.join(output_folder, f"{base_name}_*_inpainted_right_eye.mp4")
+            existing_outputs = glob.glob(pattern)
+            if existing_outputs:
+                if conflict_policy == "skip":
+                    yield file_perc, 100, 100, f"Skipping {filename} (Inpainted output already exists)", "Running"
+                    continue
+                else:
+                    yield file_perc, 0, 0, f"Overwriting {filename} (Deleting existing inpainting)", "Running"
+                    for out_file in existing_outputs:
+                        try: os.remove(out_file)
+                        except: pass
+            
+            grid_pattern = os.path.join(grid_folder, f"{base_name}_*_splatted2.mp4")
+            grid_matches = glob.glob(grid_pattern)
+            if not grid_matches:
+                error_msg = f"Error: No grid video found for {filename}."
+                fix_msg = f"Fix: Ensure that Section 1 (Warping) has been completed and the output file matching '{base_name}_*_splatted2.mp4' exists in the grid folder: {grid_folder}"
+                yield file_perc, 0, 0, f"{error_msg} | {fix_msg}", "Error"
                 continue
+                
+            grid_video_path = grid_matches[0] 
+            match_w = re.search(rf"{base_name}_(\d+)_splatted2\.mp4", os.path.basename(grid_video_path))
+            if match_w:
+                w_grid = match_w.group(1)
             else:
-                yield file_perc, 0, 0, f"Overwriting {filename} (Deleting existing inpainting)", "Running"
-                for out_file in existing_outputs:
-                    try: os.remove(out_file)
-                    except: pass
-        
-        grid_pattern = os.path.join(grid_folder, f"{base_name}_*_splatted2.mp4")
-        grid_matches = glob.glob(grid_pattern)
-        if not grid_matches:
-            error_msg = f"Error: No grid video found for {filename}."
-            fix_msg = f"Fix: Ensure that Section 1 (Warping) has been completed and the output file matching '{base_name}_*_splatted2.mp4' exists in the grid folder: {grid_folder}"
-            yield file_perc, 0, 0, f"{error_msg} | {fix_msg}", "Error"
-            continue
+                w_grid = "unknown"
+                
+            out_name = f"{base_name}_{w_grid}_inpainted_right_eye.mp4"
+            out_path = os.path.join(output_folder, out_name)
             
-        grid_video_path = grid_matches[0] 
-        match_w = re.search(rf"{base_name}_(\d+)_splatted2\.mp4", os.path.basename(grid_video_path))
-        if match_w:
-            w_grid = match_w.group(1)
-        else:
-            w_grid = "unknown"
+            temp_out_path = os.path.join(output_folder, f"{base_name}_lefteye_generated.mp4")
             
-        out_name = f"{base_name}_{w_grid}_inpainted_right_eye.mp4"
-        out_path = os.path.join(output_folder, out_name)
-        
-        temp_out_path = os.path.join(output_folder, f"{base_name}_lefteye_generated.mp4")
-        
-        if "Option 2" in model_variant:
-            model_config = "configs/m2svid_no_fullatten.yaml"
-            ckpt = "ckpts/m2svid_no_full_atten_weights.pt"
-        else:
-            model_config = "configs/m2svid.yaml"
-            ckpt = "ckpts/m2svid_weights.pt"
+            # Build job dict for the worker
+            job = {
+                "video_path": left_eye_path,
+                "grid_video_path": grid_video_path,
+                "output_folder": output_folder,
+                "mask_antialias": mask_antialias,
+                "spatial_tile_size": tile_size,
+                "spatial_tile_overlap": tile_overlap,
+                "chunk_size": chunk_size,
+                "overlap": overlap,
+                "original_input_blend_strength": original_input_blend_strength,
+            }
             
-        cmd_inpaint = [
-            sys.executable, "inpaint_and_refine.py",
-            "--video_path", left_eye_path,
-            "--grid_video_path", grid_video_path,
-            "--output_folder", output_folder,
-            "--mask_antialias", str(mask_antialias),
-            "--spatial_tile_size", str(tile_size),
-            "--spatial_tile_overlap", str(tile_overlap),
-            "--chunk_size", str(chunk_size),
-            "--overlap", str(overlap),
-            "--original_input_blend_strength", str(original_input_blend_strength),
-            "--model_config", model_config,
-            "--ckpt", ckpt,
-            "--steps", str(int(inference_steps))
-        ]
-        
-        temp_perc = 0
-        spat_perc = 0
-        
-        yield file_perc, temp_perc, spat_perc, f"Inpainting {filename}...", "Running"
-        for sub_perc, desc in run_subprocess_with_progress(cmd_inpaint, inpaint_env, f"{base_name} - Inpainting"):
-            if "Temporal" in desc:
-                temp_perc = sub_perc
-                if spat_perc == 100 or temp_perc == 0:
-                    spat_perc = 0
-            elif "Spatial" in desc:
-                spat_perc = sub_perc
+            temp_perc = 0
+            spat_perc = 0
             
-            yield file_perc, temp_perc, spat_perc, f"File {i+1}/{total_files} | {filename} - {desc}", "Running"
-        
-        if os.path.exists(temp_out_path):
-            if os.path.exists(out_path):
-                os.remove(out_path)
-            os.rename(temp_out_path, out_path)
+            yield file_perc, temp_perc, spat_perc, f"Inpainting {filename}...", "Running"
+            for sub_perc, desc in run_worker_job_with_progress(worker, job, f"{base_name} - Inpainting"):
+                if "Temporal" in desc:
+                    temp_perc = sub_perc
+                    if spat_perc == 100 or temp_perc == 0:
+                        spat_perc = 0
+                elif "Spatial" in desc:
+                    spat_perc = sub_perc
+                
+                yield file_perc, temp_perc, spat_perc, f"File {i+1}/{total_files} | {filename} - {desc}", "Running"
             
+            if os.path.exists(temp_out_path):
+                if os.path.exists(out_path):
+                    os.remove(out_path)
+                os.rename(temp_out_path, out_path)
+            
+    finally:
+        # Shut down worker cleanly
+        if worker and worker.poll() is None:
+            try:
+                worker.stdin.write("###EXIT###\n")
+                worker.stdin.flush()
+                worker.stdin.close()
+                worker.wait(timeout=30)
+            except Exception:
+                worker.kill()
         
     yield 100, 100, 100, "All files processed.", "Inpainting Section Processing Complete!"
 

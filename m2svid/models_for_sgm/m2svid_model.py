@@ -264,6 +264,7 @@ class VideoLDM(DiffusionEngine):
         batch: Dict,
         ucg_keys: List[str] = None,
         do_not_decode = False,
+        manage_devices = True,
         **kwargs,
     ) -> Dict:
         device = torch.device('cuda')
@@ -284,17 +285,19 @@ class VideoLDM(DiffusionEngine):
         frames = self.get_input(batch)
         N = len(frames)
 
-        # CPU offload: move conditioner to GPU
-        self.conditioner.to(device)
+        # CPU offload: move conditioner to GPU (skipped when caller manages devices)
+        if manage_devices:
+            self.conditioner.to(device)
 
         c, uc = self.conditioner.get_unconditional_conditioning(
             batch,
             force_uc_zero_embeddings=ucg_keys if len(self.conditioner.embedders) > 0 else [],
         )
 
-        # CPU offload: move conditioner back to CPU
-        self.conditioner.to('cpu')
-        torch.cuda.empty_cache()
+        # CPU offload: move conditioner back to CPU (skipped when caller manages devices)
+        if manage_devices:
+            self.conditioner.to('cpu')
+            torch.cuda.empty_cache()
 
         x = rearrange(frames, 'b c t h w -> (b t) c h w')
         x = x.to(device)
@@ -318,8 +321,9 @@ class VideoLDM(DiffusionEngine):
         def denoiser(input, sigma, c):
             return self.denoiser(self.model, input, sigma, c, **additional_model_inputs)
 
-        # CPU offload: move model to GPU
-        if hasattr(self, 'model'): self.model.to(device)
+        # CPU offload: move model to GPU (skipped when caller manages devices)
+        if manage_devices and hasattr(self, 'model'):
+            self.model.to(device)
 
         with self.ema_scope("Plotting"):
             with torch.autocast(device_type='cuda', dtype=torch.float16):
@@ -327,17 +331,20 @@ class VideoLDM(DiffusionEngine):
                 randn = torch.randn(shape, device=device)
                 samples = self.sampler(denoiser, randn, cond=c, uc=uc, num_video_frames=batch["num_video_frames"])
 
-        # CPU offload: move model back to CPU
-        if hasattr(self, 'model'): self.model.to('cpu')
-        torch.cuda.empty_cache()
+        # CPU offload: move model back to CPU (skipped when caller manages devices)
+        if manage_devices and hasattr(self, 'model'):
+            self.model.to('cpu')
+            torch.cuda.empty_cache()
 
         if not do_not_decode:
-            # CPU offload: move first stage to GPU
-            if hasattr(self, 'first_stage_model'): self.first_stage_model.to(device)
+            # CPU offload: move first stage to GPU (skipped when caller manages devices)
+            if manage_devices and hasattr(self, 'first_stage_model'):
+                self.first_stage_model.to(device)
             samples = self.decode_first_stage(samples.half(), num_video_frames=batch["num_video_frames"])
-            # CPU offload: move first stage back to CPU
-            if hasattr(self, 'first_stage_model'): self.first_stage_model.to('cpu')
-            torch.cuda.empty_cache()
+            # CPU offload: move first stage back to CPU (skipped when caller manages devices)
+            if manage_devices and hasattr(self, 'first_stage_model'):
+                self.first_stage_model.to('cpu')
+                torch.cuda.empty_cache()
             samples = einops.rearrange(samples, '(b t) c h w -> b c t h w', t=batch["num_video_frames"])
 
         output = {
