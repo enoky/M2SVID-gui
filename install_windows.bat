@@ -46,6 +46,24 @@ if not exist "%PYTHON_DIR%" (
     echo 1. Portable Python 3.12 already exists.
 )
 
+REM Ensure Python dev headers/libs exist (embedded Python omits them; required for
+REM torch.compile / Triton kernel compilation).
+if not exist "%PYTHON_DIR%\Include\Python.h" (
+    echo 1b. Fetching Python 3.12.9 dev headers for torch.compile support...
+    curl -sSL -o pydev.zip https://www.nuget.org/api/v2/package/python/3.12.9
+    mkdir "%PYTHON_DIR%\_pydev_tmp"
+    tar -xf pydev.zip -C "%PYTHON_DIR%\_pydev_tmp"
+    xcopy /E /I /Y "%PYTHON_DIR%\_pydev_tmp\tools\include" "%PYTHON_DIR%\Include" >nul
+    xcopy /E /I /Y "%PYTHON_DIR%\_pydev_tmp\tools\libs" "%PYTHON_DIR%\libs" >nul
+    rmdir /S /Q "%PYTHON_DIR%\_pydev_tmp"
+    del pydev.zip
+    if exist "%PYTHON_DIR%\Include\Python.h" (
+        echo     Dev headers installed.
+    ) else (
+        echo     WARNING: Could not install dev headers. torch.compile will fall back to normal mode.
+    )
+)
+
 echo.
 echo 4. Upgrading pip...
 "%PYTHON_EXE%" -m pip install --upgrade pip

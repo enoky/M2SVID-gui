@@ -32,8 +32,8 @@ parser.add_argument("--reprojected_closing_holes_kernel", type=int, default=11)
 parser.add_argument("--mask_antialias", type=int, default=False)
 parser.add_argument("--spatial_tile_size", type=int, default=512)
 parser.add_argument("--spatial_tile_overlap", type=int, default=256)
-parser.add_argument("--decode_spatial_tile_size", type=int, default=256)
-parser.add_argument("--decode_spatial_tile_overlap", type=int, default=32)
+parser.add_argument("--decode_window", type=int, default=6, help="Frames decoded together at full resolution (lower if decoding OOMs)")
+parser.add_argument("--decode_temporal_overlap", type=int, default=2, help="Frames cross-faded between consecutive decode windows")
 # New temporal chunking arguments
 parser.add_argument("--chunk_size", type=int, default=25, help="Total frames per model forward pass")
 parser.add_argument("--overlap", type=int, default=3, help="Number of frames to overlap and cross-fade")
@@ -42,6 +42,7 @@ parser.add_argument("--dry_run", action="store_true", help="Print chunk schedule
 parser.add_argument("--steps", type=int, default=None, help="Number of inference steps (default is from model config)")
 # Worker mode for batch processing (R1 optimization)
 parser.add_argument("--worker", action="store_true", help="Run as persistent worker: load model once, process clips from stdin JSON lines")
+parser.add_argument("--compile", action="store_true", help="torch.compile the UNet and VAE decoder (~15-20%% faster steady-state; one-time warmup on the first clip)")
 args = parser.parse_args()
 
 
@@ -111,7 +112,7 @@ def get_spatial_bounds(length, size, stride):
 # ---------------------------------------------------------------------------
 # Model loading (extracted for reuse in worker mode)
 # ---------------------------------------------------------------------------
-def load_model(model_config_path, ckpt_path, steps=None):
+def load_model(model_config_path, ckpt_path, steps=None, use_compile=False):
     """Load and prepare the denoising model. Returns the model in fp16 eval mode on CPU."""
     config = OmegaConf.load(model_config_path)
     if steps is not None and steps > 0:
@@ -119,6 +120,22 @@ def load_model(model_config_path, ckpt_path, steps=None):
     denoising_model = instantiate_from_config(config.model).cpu()
     denoising_model.init_from_ckpt(ckpt_path)
     denoising_model = denoising_model.half().eval()
+
+    if use_compile:
+        try:
+            import torch._dynamo as dynamo
+            # The tiled/chunked pipeline produces a handful of shape variants; keep them all compiled.
+            for knob in ("recompile_limit", "cache_size_limit"):
+                if hasattr(dynamo.config, knob):
+                    setattr(dynamo.config, knob, 64)
+            # Degrade gracefully to eager (e.g. missing Python dev headers) instead of failing the job.
+            dynamo.config.suppress_errors = True
+            denoising_model.model.diffusion_model.compile(dynamic=True)
+            denoising_model.first_stage_model.decoder.compile(dynamic=True)
+            print("torch.compile ENABLED for UNet and VAE decoder (first clip includes one-time compile warmup).")
+        except Exception as e:
+            print(f"Warning: could not enable torch.compile ({e}). Continuing in eager mode.")
+
     return denoising_model
 
 
@@ -134,7 +151,8 @@ def process_clip(denoising_model, job):
             video_path, grid_video_path, output_folder,
             reprojected_closing_holes_kernel, mask_antialias,
             spatial_tile_size, spatial_tile_overlap,
-            chunk_size, overlap, original_input_blend_strength, dry_run
+            chunk_size, overlap, decode_window, decode_temporal_overlap,
+            original_input_blend_strength, dry_run
     """
     seed = random.randint(0, 65535)
     seed_everything(seed)
@@ -149,6 +167,8 @@ def process_clip(denoising_model, job):
     spatial_tile_overlap = job.get("spatial_tile_overlap", 256)
     chunk_size = job.get("chunk_size", 25)
     overlap = job.get("overlap", 3)
+    decode_window = max(1, job.get("decode_window", 6))
+    decode_temporal_overlap = max(0, min(job.get("decode_temporal_overlap", 2), decode_window - 1))
     original_input_blend_strength = job.get("original_input_blend_strength", 0.0)
     dry_run = job.get("dry_run", False)
 
@@ -444,93 +464,56 @@ def process_clip(denoising_model, job):
 
         first_stage_model.decoder.to('cuda')
         
-        # Decode with spatial tiling: split latent into exactly 4 tiles (2x2 grid)
-        # and chunk temporally to save VRAM. decode_chunk_size controls temporal
-        # batch size through the 3D conv decoder.
-        decode_chunk_size = 4  # Configurable: temporal frames decoded together
-        decode_tile_overlap_px = 8  # Overlap in latent pixels between adjacent tiles
-        
-        # Split latent into 2x2 grid with overlap
-        tile_h = (chunk_latent_H + decode_tile_overlap_px) // 2
-        tile_h = min(tile_h, chunk_latent_H)
-        tile_w = (chunk_latent_W + decode_tile_overlap_px) // 2
-        tile_w = min(tile_w, chunk_latent_W)
-        
-        h_tiles = [(0, tile_h), (chunk_latent_H - tile_h, chunk_latent_H)]
-        w_tiles = [(0, tile_w), (chunk_latent_W - tile_w, chunk_latent_W)]
-        tile_grid = [(hs, he, ws, we) for (hs, he) in h_tiles for (ws, we) in w_tiles]
-        
-        # Actual pixel-space overlap sizes for blending ramps
-        h_overlap_px = (2 * tile_h - chunk_latent_H) * 8
-        w_overlap_px = (2 * tile_w - chunk_latent_W) * 8
-        
-        n_temporal_chunks = (n_gen + decode_chunk_size - 1) // decode_chunk_size
-        total_decode_steps = n_temporal_chunks * len(tile_grid)
-        
-        resolved_pixels_list = []
-        
-        decode_pbar = tqdm(total=total_decode_steps,
-                           desc=f"Decoding (4 tiles) chunk {ci}",
+        # Decode at FULL spatial resolution. Spatially tiled VAE decoding gives
+        # each tile slightly different per-frame normalization statistics, which
+        # shows up as tile-shaped color shifts that flicker over time. VRAM is
+        # bounded instead by decoding in overlapping temporal windows that are
+        # cross-faded in pixel space, so the VideoDecoder's temporal layers
+        # still get a multi-frame window to stabilize per-frame color.
+        t_stride = max(1, decode_window - decode_temporal_overlap)
+        t_bounds = get_spatial_bounds(n_gen, decode_window, t_stride)
+
+        # Accumulators for temporal cross-fading of decode windows (CPU)
+        pixel_accum = torch.zeros((1, 3, n_gen, H, W), dtype=torch.float32)
+        weight_accum = torch.zeros((1, 1, n_gen, 1, 1), dtype=torch.float32)
+
+        decode_pbar = tqdm(total=len(t_bounds),
+                           desc=f"Decoding Spatial chunk {ci}",
                            leave=False)
 
-        for f_idx in range(0, n_gen, decode_chunk_size):
-            end_idx = min(f_idx + decode_chunk_size, n_gen)
-            cur_n_gen = end_idx - f_idx
-            
-            # Accumulators for weighted blending of 4 tiles
-            pixel_accum = torch.zeros((1, 3, cur_n_gen, H, W), dtype=torch.float32)
-            weight_accum = torch.zeros((1, 1, cur_n_gen, H, W), dtype=torch.float32)
-            
-            for lh_s, lh_e, lw_s, lw_e in tile_grid:
-                # Decode this tile
-                latent_tile = resolved[:, :, f_idx:end_idx, lh_s:lh_e, lw_s:lw_e].cuda()
-                latent_tile_flat = einops.rearrange(latent_tile, 'b c t h w -> (b t) c h w')
-                with torch.inference_mode():
-                    with torch.autocast("cuda", dtype=torch.float16):
-                        decoded_flat = denoising_model.decode_first_stage(latent_tile_flat, num_video_frames=cur_n_gen)
-                decoded_tile = einops.rearrange(decoded_flat, '(b t) c h w -> b c t h w', b=1, t=cur_n_gen).cpu().float()
-                del latent_tile, latent_tile_flat, decoded_flat
-                
-                # Pixel-space coordinates for this tile
-                ph_s, ph_e = lh_s * 8, lh_e * 8
-                pw_s, pw_e = lw_s * 8, lw_e * 8
-                tile_ph = ph_e - ph_s
-                tile_pw = pw_e - pw_s
-                
-                # Build separable 2D blending weight with ramps at overlap edges
-                w_h = torch.ones(tile_ph, dtype=torch.float32)
-                w_w = torch.ones(tile_pw, dtype=torch.float32)
-                
-                if ph_s > 0 and h_overlap_px > 0:  # Top edge overlaps with tile above
-                    ramp_len = min(h_overlap_px, tile_ph)
-                    w_h[:ramp_len] = torch.linspace(0, 1, ramp_len)
-                if ph_e < H and h_overlap_px > 0:   # Bottom edge overlaps with tile below
-                    ramp_len = min(h_overlap_px, tile_ph)
-                    w_h[-ramp_len:] = torch.linspace(1, 0, ramp_len)
-                if pw_s > 0 and w_overlap_px > 0:   # Left edge overlaps with tile to the left
-                    ramp_len = min(w_overlap_px, tile_pw)
-                    w_w[:ramp_len] = torch.linspace(0, 1, ramp_len)
-                if pw_e < W and w_overlap_px > 0:   # Right edge overlaps with tile to the right
-                    ramp_len = min(w_overlap_px, tile_pw)
-                    w_w[-ramp_len:] = torch.linspace(1, 0, ramp_len)
-                
-                # Outer product → 2D weight mask, broadcast over batch/channel/time
-                weight_2d = w_h.view(1, 1, 1, -1, 1) * w_w.view(1, 1, 1, 1, -1)
-                
-                pixel_accum[:, :, :, ph_s:ph_e, pw_s:pw_e] += decoded_tile * weight_2d
-                weight_accum[:, :, :, ph_s:ph_e, pw_s:pw_e] += weight_2d
-                
-                del decoded_tile, weight_2d
-                decode_pbar.update(1)
-            
-            # Resolve weighted average and convert back to half precision
-            decoded_chunk = (pixel_accum / weight_accum).half()
-            resolved_pixels_list.append(decoded_chunk)
-            del pixel_accum, weight_accum, decoded_chunk
+        for t_s, t_e in t_bounds:
+            win_len = t_e - t_s
+            latent_win = resolved[:, :, t_s:t_e].cuda()
+            latent_win_flat = einops.rearrange(latent_win, 'b c t h w -> (b t) c h w')
+            with torch.inference_mode():
+                with torch.autocast("cuda", dtype=torch.float16):
+                    decoded_flat = denoising_model.decode_first_stage(latent_win_flat, num_video_frames=win_len)
+            decoded_win = einops.rearrange(decoded_flat, '(b t) c h w -> b c t h w', b=1, t=win_len).cpu().float()
+            del latent_win, latent_win_flat, decoded_flat
+            torch.cuda.empty_cache()
+
+            # Temporal cross-fade ramps at window edges. Ramp endpoints are
+            # excluded so aligned head/tail ramps sum to 1 and no frame ever
+            # gets zero total weight.
+            w_t = torch.ones(win_len, dtype=torch.float32)
+            ramp_len = min(decode_temporal_overlap, win_len)
+            if t_s > 0 and ramp_len > 0:
+                w_t[:ramp_len] = torch.linspace(0, 1, ramp_len + 2)[1:-1]
+            if t_e < n_gen and ramp_len > 0:
+                w_t[-ramp_len:] = torch.linspace(1, 0, ramp_len + 2)[1:-1]
+            w_t = w_t.view(1, 1, -1, 1, 1)
+
+            pixel_accum[:, :, t_s:t_e] += decoded_win * w_t
+            weight_accum[:, :, t_s:t_e] += w_t
+
+            del decoded_win
+            decode_pbar.update(1)
 
         decode_pbar.close()
-        
-        resolved_pixels = torch.cat(resolved_pixels_list, dim=2)
+
+        # Resolve weighted average and convert back to half precision
+        resolved_pixels = (pixel_accum / weight_accum).half()
+        del pixel_accum, weight_accum
 
         new_overlap_buffer = []
 
@@ -582,7 +565,7 @@ if __name__ == "__main__":
         # WORKER MODE (R1): Load model once, process clips from stdin
         # ---------------------------------------------------------------
         print("Loading model (worker mode)...")
-        denoising_model = load_model(args.model_config, args.ckpt, args.steps)
+        denoising_model = load_model(args.model_config, args.ckpt, args.steps, use_compile=args.compile)
         
         # Signal readiness to parent process
         sys.stdout.write("###WORKER_READY###\n")
@@ -622,7 +605,7 @@ if __name__ == "__main__":
         # ---------------------------------------------------------------
         # LEGACY MODE: Single-clip processing (backward compatible)
         # ---------------------------------------------------------------
-        denoising_model = load_model(args.model_config, args.ckpt, args.steps)
+        denoising_model = load_model(args.model_config, args.ckpt, args.steps, use_compile=args.compile)
         job = {
             "video_path": args.video_path,
             "grid_video_path": args.grid_video_path,
@@ -633,6 +616,8 @@ if __name__ == "__main__":
             "spatial_tile_overlap": args.spatial_tile_overlap,
             "chunk_size": args.chunk_size,
             "overlap": args.overlap,
+            "decode_window": args.decode_window,
+            "decode_temporal_overlap": args.decode_temporal_overlap,
             "original_input_blend_strength": args.original_input_blend_strength,
             "dry_run": args.dry_run,
         }

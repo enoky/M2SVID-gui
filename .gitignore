@@ -4,6 +4,7 @@ __pycache__/
 # Project Specific Excludes
 python_embed/
 ckpts/
+torchinductor_cache/
 outputs/
 input/
 demo/output/
@@ -12,3 +13,4 @@ demo/output/
 *.pt
 *.npz
 *.mergesettings.json
+m2svid_gui_settings.json

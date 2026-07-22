@@ -247,6 +247,7 @@ def default_gui_settings():
             "chunk_size": 25,
             "overlap": 3,
             "original_input_blend_strength": 0.0,
+            "use_torch_compile": False,
         },
         "merging": {
             "inpainted_folder": "demo/refine_output",
@@ -324,6 +325,7 @@ def pack_gui_settings_dict(args_tuple):
         w_preview_source, w_frame_slider,
         i_lefteye_folder, i_grid_folder, i_output_folder,
         i_model_variant, i_mask_antialias, i_tile_size, i_tile_overlap, i_chunk_size, i_overlap, i_original_input_blend_strength,
+        i_use_compile,
         m_inpainted_folder, m_original_folder, m_mask_folder, m_output_folder,
         m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse, m_batch_chunk_size, m_convergence, m_convergence_mode,
         m_codec, m_output_crf,
@@ -371,6 +373,7 @@ def pack_gui_settings_dict(args_tuple):
             "chunk_size": i_chunk_size,
             "overlap": i_overlap,
             "original_input_blend_strength": i_original_input_blend_strength,
+            "use_torch_compile": i_use_compile,
         },
         "merging": {
             "inpainted_folder": m_inpainted_folder,
@@ -816,7 +819,7 @@ def process_warping(
 def process_inpainting(
     left_eye_folder, grid_folder, output_folder,
     mask_antialias, tile_size, tile_overlap, chunk_size, overlap, original_input_blend_strength,
-    model_variant, inference_steps=1, conflict_policy="skip"
+    model_variant, inference_steps=1, use_compile=False, conflict_policy="skip"
 ):
     if not left_eye_folder or not os.path.isdir(left_eye_folder):
         yield 0, 0, 0, "Left Eye folder does not exist.", "Error"
@@ -832,6 +835,9 @@ def process_inpainting(
     
     inpaint_env = env_vars.copy()
     inpaint_env['PYTORCH_ALLOC_CONF'] = 'max_split_size_mb:128'
+    if use_compile:
+        # Persist compiled kernels across sessions so the compile warmup happens once, not per launch.
+        inpaint_env['TORCHINDUCTOR_CACHE_DIR'] = os.path.join(os.getcwd(), "torchinductor_cache")
 
     left_eye_files = glob.glob(os.path.join(left_eye_folder, "*_lefteye.mp4"))
     total_files = len(left_eye_files)
@@ -856,6 +862,8 @@ def process_inpainting(
         "--ckpt", ckpt,
         "--steps", str(int(inference_steps))
     ]
+    if use_compile:
+        cmd_worker.append("--compile")
     
     worker = None
     try:
@@ -1486,6 +1494,10 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                     i_overlap = gr.Number(label="Overlap (Temporal Crossfade)", value=3, precision=0)
                     i_original_input_blend_strength = gr.Number(label="Original Input Blend Strength (Context)", value=0.0, step=0.1)
                     i_inference_steps = gr.Number(label="Inference Steps (1=Default, 2=Better Quality)", value=1, precision=0)
+                    i_use_compile = gr.Checkbox(
+                        label="⚡ torch.compile (~15-20% faster; one-time warmup on first clip, cached across sessions)",
+                        value=False,
+                    )
                     
             with gr.Row():
                 i_file_prog = gr.HTML(value=make_progress_html(0, "Overall File Progress (%)"))
@@ -1513,7 +1525,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             def start_inpainting_flow(
                 left_eye_f, grid_f, output_f,
                 mask_antialias, tile_size, tile_overlap, chunk_size, overlap, blend_strength,
-                model_variant, inference_steps
+                model_variant, inference_steps, use_compile
             ):
                 if not left_eye_f or not os.path.isdir(left_eye_f):
                     return { i_output: "Error: Left Eye folder invalid.", i_has_conflicts: False }
@@ -1546,7 +1558,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 has_conflicts,
                 left_eye_folder, grid_folder, output_folder,
                 mask_antialias, tile_size, tile_overlap, chunk_size, overlap, blend_strength,
-                model_variant, inference_steps, conflict_policy="skip"
+                model_variant, inference_steps, use_compile, conflict_policy="skip"
             ):
                 if has_conflicts:
                     return
@@ -1561,7 +1573,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
                 for f_perc, t_perc, s_perc, p_text, p_stat in process_inpainting(
                     left_eye_folder, grid_folder, output_folder,
                     mask_antialias, tile_size, tile_overlap, chunk_size, overlap, blend_strength,
-                    model_variant, inference_steps, conflict_policy=conflict_policy
+                    model_variant, inference_steps, use_compile=use_compile, conflict_policy=conflict_policy
                 ):
                     yield make_progress_html(f_perc, "Overall File Progress (%)"), make_progress_html(t_perc, "Temporal Chunks Progress (%)"), make_progress_html(s_perc, "Spatial Tiles Progress (%)"), p_text, p_stat
 
@@ -1569,7 +1581,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             _i_inputs = [
                 i_lefteye_folder, i_grid_folder, i_output_folder,
                 i_mask_antialias, i_tile_size, i_tile_overlap, i_chunk_size, i_overlap, i_original_input_blend_strength,
-                i_model_variant, i_inference_steps
+                i_model_variant, i_inference_steps, i_use_compile
             ]
 
             i_btn.click(
@@ -2080,6 +2092,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
         w_preview_source, w_frame_slider,
         i_lefteye_folder, i_grid_folder, i_output_folder,
         i_model_variant, i_mask_antialias, i_tile_size, i_tile_overlap, i_chunk_size, i_overlap, i_original_input_blend_strength,
+        i_use_compile,
         m_inpainted_folder, m_original_folder, m_mask_folder, m_output_folder,
         m_output_format, m_use_gpu, m_color_transfer, m_undo_reverse, m_batch_chunk_size, m_convergence, m_convergence_mode,
         m_codec, m_output_crf,
@@ -2099,6 +2112,7 @@ with gr.Blocks(title="M2SVID Pipeline", theme=m2svid_theme, css=_M2SVID_BLOCKS_C
             w["preview_source"], w["frame_slider"],
             i["lefteye_folder"], i["grid_folder"], i["output_folder"],
             i["model_variant"], i["mask_antialias"], i["tile_size"], i["tile_overlap"], i["chunk_size"], i["overlap"], i["original_input_blend_strength"],
+            i.get("use_torch_compile", False),
             m["inpainted_folder"], m["original_folder"], m["mask_folder"], m["output_folder"],
             m["output_format"], m["use_gpu"], m["color_transfer"], m["undo_reverse"], m["batch_chunk_size"], m["convergence"], m["convergence_mode"],
             m["codec"], m["output_crf"],
